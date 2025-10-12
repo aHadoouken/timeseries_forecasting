@@ -1,0 +1,49 @@
+# Base configuration for vibration prediction system
+data:
+  window_size: 500
+  prediction_horizon: 100
+  stride: 50
+  sampling_rate: 10  # reduced from ~100 to 10
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+  dataset_path: "project/create_datasets/datasets"
+  dataset_name: "mathieu_delayed_dataset.pkl"
+
+features:
+  use_features: ['basic']
+  window_sizes: [10, 50, 100]  # for rolling statistics
+
+training:
+  batch_size: 32
+  learning_rate: 0.001
+  epochs: 100
+  early_stopping_patience: 15
+  gradient_clipping: 1.0
+  optimizer: 'adam'
+  scheduler: 'reduce_lr_on_plateau'
+
+augmentation:
+  noise_level: 0.01
+  time_warping: true
+  parameter_interpolation: true
+
+model:
+  hidden_size: 128
+  num_layers: 2
+  dropout: 0.2
+  recurrent_dropout: 0.2
+
+loss:
+  weights:
+    trajectory: 1.0
+    amplitude: 2.0
+    stability: 0.5
+    physics: 0.1
+
+logging:
+  log_interval: 10
+  save_interval: 50
+  plot_predictions: true
+
+random_seed: 42

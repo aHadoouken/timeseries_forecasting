@@ -1,0 +1,29 @@
+# LSTM specific configuration
+model:
+  type: 'lstm'
+  hidden_size: 256
+  num_layers: 3
+  dropout: 0.3
+  recurrent_dropout: 0.3
+  bidirectional: false
+
+  # Input processing
+  input_normalization: 'z_score'  # 'z_score' or 'min_max'
+  parameter_embedding_dim: 32
+
+  # Output processing
+  output_layers: [128, 64]
+  output_activation: 'tanh'
+
+training:
+  batch_size: 16  # smaller batch for LSTM
+  learning_rate: 0.0005
+  weight_decay: 1e-5
+  scheduler_patience: 10
+  scheduler_factor: 0.5
+
+data:
+  # Override base config for LSTM
+  window_size: 1000  # longer sequences for LSTM
+  prediction_horizon: 200
+  stride: 100
