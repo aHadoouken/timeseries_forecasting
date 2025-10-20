@@ -44,20 +44,10 @@ class DataResampler:
         if abs(original_rate - self.target_sampling_rate) < 1e-6:
             return t, x, x_dot
 
-        # Calculate decimation factor
-        decimation_factor = int(original_rate / self.target_sampling_rate)
-
-        if decimation_factor > 1:
-            # Downsample with anti-aliasing filter
-            x_resampled = signal.decimate(x, decimation_factor, ftype='iir')
-            x_dot_resampled = signal.decimate(x_dot, decimation_factor, ftype='iir')
-            t_resampled = t[::decimation_factor][:len(x_resampled)]
-        else:
-            # Upsample using interpolation
-            upsample_factor = int(self.target_sampling_rate / original_rate)
-            t_resampled = np.linspace(t[0], t[-1], len(t) * upsample_factor)
-            x_resampled = np.interp(t_resampled, t, x)
-            x_dot_resampled = np.interp(t_resampled, t, x_dot)
+        upsample_factor = self.target_sampling_rate / original_rate
+        t_resampled = np.linspace(t[0], t[-1], int(len(t) * upsample_factor))
+        x_resampled = np.interp(t_resampled, t, x)
+        x_dot_resampled = np.interp(t_resampled, t, x_dot)
 
         return t_resampled, x_resampled, x_dot_resampled
 
@@ -180,68 +170,17 @@ class VibrationDataset(Dataset):
         """
         trajectories = self.trajectories.copy()
 
-        # Exclude specified parameter combinations from training
-        if exclude_params and self.split == 'train':
-            filtered_trajectories = []
-            for traj in trajectories:
-                exclude = False
-                for exclude_param in exclude_params:
-                    match = all(
-                        abs(traj['parameters'].get(k, 0) - v) < 1e-6
-                        for k, v in exclude_param.items()
-                    )
-                    if match:
-                        exclude = True
-                        break
-                if not exclude:
-                    filtered_trajectories.append(traj)
-            trajectories = filtered_trajectories
-
-        if self.temporal_split:
-            # Temporal split: use beginning for train, end for test
-            train_trajectories = []
-            val_trajectories = []
-            test_trajectories = []
-
-            for traj in trajectories:
-                t = traj['solution']['t']
-                total_len = len(t)
-
-                train_end = int(total_len * train_split)
-                val_end = int(total_len * (train_split + val_split))
-
-                # Create sub-trajectories
-                train_traj = self._create_sub_trajectory(traj, 0, train_end)
-                val_traj = self._create_sub_trajectory(traj, train_end, val_end)
-                test_traj = self._create_sub_trajectory(traj, val_end, total_len)
-
-                train_trajectories.append(train_traj)
-                val_trajectories.append(val_traj)
-                test_trajectories.append(test_traj)
-        else:
-            # Stratified split based on max_amplitude
-            amplitudes = [traj['metadata']['max_amplitude'] for traj in trajectories]
-
-            # Create amplitude bins for stratification
-            amplitude_bins = np.digitize(amplitudes, np.percentile(amplitudes, [25, 50, 75]))
-
-            train_trajectories, temp_trajectories = train_test_split(
-                trajectories,
-                test_size=(1 - train_split),
-                stratify=amplitude_bins,
-                random_state=self.random_seed
-            )
-
-            temp_amplitudes = [traj['metadata']['max_amplitude'] for traj in temp_trajectories]
-            temp_bins = np.digitize(temp_amplitudes, np.percentile(temp_amplitudes, [50]))
-
-            val_size = val_split / (val_split + test_split)
-            val_trajectories, test_trajectories = train_test_split(
-                temp_trajectories,
-                test_size=(1 - val_size),
-                stratify=temp_bins,
-                random_state=self.random_seed
-            )
+        train_trajectories, temp_trajectories = train_test_split(
+            trajectories,
+            test_size=(1 - train_split),
+            random_state=self.random_seed
+        )
+        val_size = val_split / (val_split + test_split)
+        val_trajectories, test_trajectories = train_test_split(
+            temp_trajectories,
+            test_size=(1 - val_size),
+            random_state=self.random_seed
+        )
 
         logger.info(f"Data split: {len(train_trajectories)} train, {len(val_trajectories)} val, {len(test_trajectories)} test")
         return train_trajectories, val_trajectories, test_trajectories
@@ -385,10 +324,10 @@ class VibrationDataset(Dataset):
 
         return {
             'features': features,
-            'parameters': params,
+            # 'parameters': params,
             'targets': targets,
-            'trajectory_id': seq['trajectory_id'],
-            'max_amplitude': torch.FloatTensor([seq['metadata']['max_amplitude']])
+            # 'trajectory_id': seq['trajectory_id'],
+            # 'max_amplitude': torch.FloatTensor([seq['metadata']['max_amplitude']])
         }
 
     def get_scalers(self) -> Dict:

@@ -94,8 +94,8 @@ class LSTMPredictor(BaseVibrationModel):
         self.bidirectional = config.get('bidirectional', False)
 
         # Parameter embedding
-        self.n_params = config.get('n_params', 15)  # Number of system parameters
-        self.param_embedding_dim = config.get('parameter_embedding_dim', 32)
+        # self.n_params = config.get('n_params', 15)  # Number of system parameters
+        # self.param_embedding_dim = config.get('parameter_embedding_dim', 32)
 
         # Output configuration
         self.output_size = config.get('output_size', 2)  # x, x_dot
@@ -109,7 +109,7 @@ class LSTMPredictor(BaseVibrationModel):
         self._build_model()
 
         # Initialize weights
-        self._initialize_weights()
+        # self._initialize_weights()
 
         logger.info(f"LSTM Predictor initialized: {self.get_model_info()}")
 
@@ -118,14 +118,14 @@ class LSTMPredictor(BaseVibrationModel):
         Build model architecture.
         """
         # Parameter embedding
-        self.param_embedding = ParameterEmbedding(
-            self.n_params,
-            self.param_embedding_dim
-        )
+        # self.param_embedding = ParameterEmbedding(
+        #     self.n_params,
+        #     self.param_embedding_dim
+        # )
 
         # Input projection (combine features with parameter embedding)
         self.input_projection = nn.Linear(
-            self.input_size + self.param_embedding_dim,
+            self.input_size,
             self.hidden_size
         )
 
@@ -141,11 +141,11 @@ class LSTMPredictor(BaseVibrationModel):
 
         # Attention mechanism
         lstm_output_size = self.hidden_size * (2 if self.bidirectional else 1)
-        self.attention = AttentionMechanism(lstm_output_size)
+        # self.attention = AttentionMechanism(lstm_output_size)
 
         # Output layers
         output_layers = []
-        prev_size = lstm_output_size + self.param_embedding_dim  # Include params in output
+        prev_size = lstm_output_size
 
         for layer_size in self.output_layers:
             output_layers.extend([
@@ -169,7 +169,7 @@ class LSTMPredictor(BaseVibrationModel):
 
         # Trajectory prediction head
         self.trajectory_head = nn.Sequential(
-            nn.Linear(lstm_output_size + self.param_embedding_dim, self.hidden_size),
+            nn.Linear(lstm_output_size, self.hidden_size),
             nn.ReLU(),
             nn.Dropout(self.dropout),
             nn.Linear(self.hidden_size, self.output_size)
@@ -177,32 +177,31 @@ class LSTMPredictor(BaseVibrationModel):
 
         # Amplitude prediction head
         self.amplitude_head = nn.Sequential(
-            nn.Linear(lstm_output_size + self.param_embedding_dim, 64),
+            nn.Linear(lstm_output_size, 64),
             nn.ReLU(),
             nn.Dropout(self.dropout),
             nn.Linear(64, 1),
             nn.ReLU()  # Amplitude is always positive
         )
 
-    def _initialize_weights(self):
-        """
-        Initialize model weights.
-        """
-        for name, param in self.named_parameters():
-            if 'weight' in name:
-                if 'lstm' in name:
-                    # LSTM weights
-                    nn.init.orthogonal_(param)
-                else:
-                    # Linear layer weights
-                    nn.init.xavier_uniform_(param)
-            elif 'bias' in name:
-                nn.init.constant_(param, 0)
+    # def _initialize_weights(self):
+    #     """
+    #     Initialize model weights.
+    #     """
+    #     for name, param in self.named_parameters():
+    #         if 'weight' in name:
+    #             if 'lstm' in name:
+    #                 # LSTM weights
+    #                 nn.init.orthogonal_(param)
+    #             else:
+    #                 # Linear layer weights
+    #                 nn.init.xavier_uniform_(param)
+    #         elif 'bias' in name:
+    #             nn.init.constant_(param, 0)
 
     def forward(
         self,
-        features: torch.Tensor,
-        parameters: torch.Tensor
+        batch: Dict[str, torch.Tensor]
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass of the LSTM predictor.
@@ -214,39 +213,44 @@ class LSTMPredictor(BaseVibrationModel):
         Returns:
             Dictionary containing model outputs
         """
+        features = batch['features']
+        targets = batch['targets']
         batch_size, seq_len, _ = features.shape
+        batch_size, horizon_len, _ = targets.shape
+
+        x = torch.cat([features, targets], dim=1)
 
         # Embed parameters
-        param_embedded = self.param_embedding(parameters)  # [batch_size, param_embedding_dim]
+        # param_embedded = self.param_embedding(parameters)  # [batch_size, param_embedding_dim]
 
         # Expand parameter embedding to match sequence length
-        param_expanded = param_embedded.unsqueeze(1).expand(-1, seq_len, -1)  # [batch_size, seq_len, param_embedding_dim]
+        # param_expanded = param_embedded.unsqueeze(1).expand(-1, seq_len, -1)  # [batch_size, seq_len, param_embedding_dim]
 
         # Combine features with parameter embedding
-        combined_input = torch.cat([features, param_expanded], dim=-1)  # [batch_size, seq_len, input_size + param_embedding_dim]
+        # combined_input = torch.cat([features, param_expanded], dim=-1)  # [batch_size, seq_len, input_size + param_embedding_dim]
 
         # Project to hidden size
-        projected_input = self.input_projection(combined_input)  # [batch_size, seq_len, hidden_size]
+        projected_input = self.input_projection(x)  # [batch_size, seq_len, hidden_size]
 
         # LSTM forward pass
         lstm_output, (hidden, cell) = self.lstm(projected_input)  # [batch_size, seq_len, lstm_output_size]
 
         # Apply attention
-        attended_output, attention_weights = self.attention(lstm_output)  # [batch_size, lstm_output_size]
+        # output_input, attention_weights = self.attention(lstm_output)  # [batch_size, lstm_output_size]
 
         # Combine with parameter embedding for output
-        output_input = torch.cat([attended_output, param_embedded], dim=-1)
+        # output_input = torch.cat([attended_output, param_embedded], dim=-1)
 
         # Generate outputs
-        next_step = self.output_net(output_input)  # [batch_size, output_size]
-        trajectory_pred = self.trajectory_head(output_input)  # [batch_size, output_size]
-        amplitude_pred = self.amplitude_head(output_input)  # [batch_size, 1]
+        trajectory_pred = self.output_net(lstm_output)  # [batch_size, seq_len, output_size]
+        # trajectory_pred = self.trajectory_head(output_input)  # [batch_size, output_size]
+        # amplitude_pred = self.amplitude_head(output_input)  # [batch_size, 1]
 
         return {
-            'next_step': next_step,
+            # 'next_step': next_step,
             'trajectory': trajectory_pred,
-            'amplitude': amplitude_pred,
-            'attention_weights': attention_weights,
+            # 'amplitude': amplitude_pred,
+            # 'attention_weights': attention_weights,
             'hidden_state': hidden,
             'cell_state': cell,
             'lstm_output': lstm_output
