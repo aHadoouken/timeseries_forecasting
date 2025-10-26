@@ -194,7 +194,7 @@ class Trainer:
             outputs = self.model(batch)["trajectory"]
 
             predictions = outputs[:, seq_len - 1:-1, :]
-            targets = batch["targets"]
+            targets = batch["targets"][:,:,0:1]
 
             # Compute loss
             loss = self.criterion(
@@ -283,10 +283,10 @@ class Trainer:
                 batch_size, horizon_len, _ = targets.shape
 
                 # Forward pass
-                outputs = self.model(batch)["trajectory"]
+                outputs = self.model(batch)
 
-                predictions = outputs[:, seq_len - 1:-1, :]
-                targets = batch["targets"]
+                predictions = outputs["trajectory"][:, seq_len - 1:-1, :]
+                targets = batch["targets"][:,:,0:1]
 
                 # Compute loss
                 loss = self.criterion(
