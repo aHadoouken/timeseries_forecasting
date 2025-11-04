@@ -269,9 +269,9 @@ class VibrationDataset(Dataset):
             self.scalers['x_dot'] = StandardScaler().fit(all_x_dot)
             self.scalers['params'] = StandardScaler().fit(all_params)
         else:
-            self.scalers['x'] = MinMaxScaler().fit(all_x)
-            self.scalers['x_dot'] = MinMaxScaler().fit(all_x_dot)
-            self.scalers['params'] = MinMaxScaler().fit(all_params)
+            self.scalers['x'] = MinMaxScaler((-1, 1)).fit(all_x)
+            self.scalers['x_dot'] = MinMaxScaler((-1, 1)).fit(all_x_dot)
+            self.scalers['params'] = MinMaxScaler((-1, 1)).fit(all_params)
 
     def __len__(self) -> int:
         return len(self.sequences)

@@ -94,8 +94,8 @@ class VibrationMetrics:
             return {}
 
         # Concatenate all predictions and targets
-        all_predictions = np.concatenate(self.predictions, axis=1)
-        all_targets = np.concatenate(self.targets, axis=1)
+        all_predictions = np.concatenate(self.predictions, axis=0)
+        all_targets = np.concatenate(self.targets, axis=0)
 
         metrics = {}
 

@@ -194,7 +194,7 @@ class Trainer:
             outputs = self.model(batch)["trajectory"]
 
             predictions = outputs[:, seq_len - 1:-1, :]
-            targets = batch["targets"][:,:,0:1]
+            targets = batch["targets"]
 
             # Compute loss
             loss = self.criterion(
@@ -286,7 +286,7 @@ class Trainer:
                 outputs = self.model(batch)
 
                 predictions = outputs["trajectory"][:, seq_len - 1:-1, :]
-                targets = batch["targets"][:,:,0:1]
+                targets = batch["targets"]
 
                 # Compute loss
                 loss = self.criterion(
@@ -392,8 +392,8 @@ class Trainer:
                 self.save_checkpoint(f"checkpoint_epoch_{epoch}.pth", epoch)
 
             # Plot predictions periodically
-            if self.plot_predictions and epoch % (self.save_interval // 2) == 0:
-                self.plot_sample_predictions(epoch)
+            # if self.plot_predictions and epoch % (self.save_interval // 2) == 0:
+            #     self.plot_sample_predictions(epoch)
 
             # Early stopping
             if epochs_without_improvement >= self.early_stopping_patience:
