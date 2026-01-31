@@ -3,20 +3,17 @@ Visualization utilities for vibration prediction analysis.
 """
 
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-from matplotlib.patches import Rectangle
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import plotly.express as px
 import torch
 from typing import Dict, List, Tuple, Optional, Union
 from scipy import signal
 from scipy.stats import gaussian_kde
 import logging
+import os
 
 logger = logging.getLogger(__name__)
-
-# Set style
-plt.style.use('seaborn-v0_8')
-sns.set_palette("husl")
 
 
 class VibrationVisualizer:
@@ -24,16 +21,16 @@ class VibrationVisualizer:
     Comprehensive visualization tools for vibration data and predictions.
     """
 
-    def __init__(self, figsize: Tuple[int, int] = (12, 8), dpi: int = 150):
+    def __init__(self, width: int = 1200, height: int = 800):
         """
         Initialize visualizer.
 
         Args:
-            figsize: Default figure size
-            dpi: Figure DPI
+            width: Default figure width
+            height: Default figure height
         """
-        self.figsize = figsize
-        self.dpi = dpi
+        self.width = width
+        self.height = height
 
     def plot_trajectory_comparison(
         self,
@@ -60,10 +57,7 @@ class VibrationVisualizer:
             save_path: Path to save figure
         """
         n_features = input_data.shape[1]
-        fig, axes = plt.subplots(n_features, 1, figsize=self.figsize, dpi=self.dpi)
-
-        if n_features == 1:
-            axes = [axes]
+        fig = make_subplots(rows=n_features, cols=1, subplot_titles=feature_names)
 
         # Create time arrays if not provided
         if time_input is None:
@@ -71,36 +65,69 @@ class VibrationVisualizer:
         if time_target is None:
             time_target = np.arange(len(input_data), len(input_data) + len(target_data))
 
-        for i, (ax, feature_name) in enumerate(zip(axes, feature_names)):
+        for i, feature_name in enumerate(feature_names):
             # Plot input
-            ax.plot(time_input, input_data[:, i],
-                   label='Input', color='blue', alpha=0.7, linewidth=2)
+            fig.add_trace(go.Scatter(
+                x=time_input,
+                y=input_data[:, i],
+                name='Input',
+                line=dict(color='blue', width=2),
+                opacity=0.7,
+                legendgroup='input',
+                showlegend=(i == 0)
+            ), row=i+1, col=1)
 
             # Plot target
-            ax.plot(time_target, target_data[:, i],
-                   label='Target', color='green', linewidth=2)
+            fig.add_trace(go.Scatter(
+                x=time_target,
+                y=target_data[:, i],
+                name='Target',
+                line=dict(color='green', width=2),
+                legendgroup='target',
+                showlegend=(i == 0)
+            ), row=i+1, col=1)
 
             # Plot prediction
-            ax.plot(time_target, predicted_data[:, i],
-                   label='Prediction', color='red', linestyle='--', linewidth=2)
+            fig.add_trace(go.Scatter(
+                x=time_target,
+                y=predicted_data[:, i],
+                name='Prediction',
+                line=dict(color='red', width=2, dash='dash'),
+                legendgroup='prediction',
+                showlegend=(i == 0)
+            ), row=i+1, col=1)
 
             # Add vertical line at prediction start
-            ax.axvline(x=time_input[-1], color='gray', linestyle=':', alpha=0.7)
-
-            # Formatting
-            ax.set_ylabel(feature_name)
-            ax.legend()
-            ax.grid(True, alpha=0.3)
+            fig.add_vline(
+                x=time_input[-1],
+                line=dict(color='gray', dash='dot', width=1),
+                row=i+1, col=1
+            )
 
             # Highlight prediction region
-            ax.axvspan(time_target[0], time_target[-1], alpha=0.1, color='red')
+            fig.add_vrect(
+                x0=time_target[0],
+                x1=time_target[-1],
+                fillcolor="red",
+                opacity=0.1,
+                line_width=0,
+                row=i+1, col=1
+            )
 
-        axes[-1].set_xlabel('Time')
-        plt.suptitle(title, fontsize=14, fontweight='bold')
-        plt.tight_layout()
+            fig.update_yaxes(title_text=feature_name, row=i+1, col=1)
+
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=16, family="Arial", color="black")),
+            width=self.width,
+            height=self.height * n_features,
+            showlegend=True,
+            template="plotly_white"
+        )
+
+        fig.update_xaxes(title_text="Time", row=n_features, col=1)
 
         if save_path:
-            plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            fig.write_image(save_path)
 
         return fig
 
@@ -120,28 +147,63 @@ class VibrationVisualizer:
             title: Plot title
             save_path: Path to save figure
         """
-        fig, ax = plt.subplots(figsize=self.figsize, dpi=self.dpi)
+        fig = go.Figure()
+        colors = px.colors.qualitative.Plotly
 
-        colors = plt.cm.tab10(np.linspace(0, 1, len(trajectories)))
-
-        for traj, label, color in zip(trajectories, labels, colors):
+        for i, (traj, label) in enumerate(zip(trajectories, labels)):
             if traj.shape[1] >= 2:
-                ax.plot(traj[:, 0], traj[:, 1], label=label, color=color, alpha=0.7)
+                # Plot trajectory
+                fig.add_trace(go.Scatter(
+                    x=traj[:, 0],
+                    y=traj[:, 1],
+                    mode='lines',
+                    name=label,
+                    line=dict(color=colors[i % len(colors)], width=2),
+                    opacity=0.7
+                ))
 
-                # Mark start and end points
-                ax.scatter(traj[0, 0], traj[0, 1], color=color, s=100, marker='o',
-                          edgecolor='black', linewidth=2, label=f'{label} Start')
-                ax.scatter(traj[-1, 0], traj[-1, 1], color=color, s=100, marker='s',
-                          edgecolor='black', linewidth=2, label=f'{label} End')
+                # Mark start point
+                fig.add_trace(go.Scatter(
+                    x=[traj[0, 0]],
+                    y=[traj[0, 1]],
+                    mode='markers',
+                    name=f'{label} Start',
+                    marker=dict(
+                        color=colors[i % len(colors)],
+                        size=10,
+                        symbol='circle',
+                        line=dict(width=2, color='black')
+                    ),
+                    showlegend=True
+                ))
 
-        ax.set_xlabel('Position')
-        ax.set_ylabel('Velocity')
-        ax.set_title(title, fontweight='bold')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+                # Mark end point
+                fig.add_trace(go.Scatter(
+                    x=[traj[-1, 0]],
+                    y=[traj[-1, 1]],
+                    mode='markers',
+                    name=f'{label} End',
+                    marker=dict(
+                        color=colors[i % len(colors)],
+                        size=10,
+                        symbol='square',
+                        line=dict(width=2, color='black')
+                    ),
+                    showlegend=True
+                ))
+
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=16, family="Arial", color="black")),
+            xaxis_title='Position',
+            yaxis_title='Velocity',
+            width=self.width,
+            height=self.height,
+            showlegend=True,
+            template="plotly_white"
+        )
 
         if save_path:
-            plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            fig.write_image(save_path)
 
         return fig
 
@@ -165,63 +227,106 @@ class VibrationVisualizer:
             title: Plot title
             save_path: Path to save figure
         """
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10), dpi=self.dpi)
+        fig = make_subplots(
+            rows=2,
+            cols=2,
+            subplot_titles=(
+                'Predicted vs True Amplitudes',
+                'Residuals vs True Amplitudes',
+                'Amplitude Distributions',
+                'Relative Error Distribution'
+            )
+        )
 
         # Scatter plot: predicted vs true
-        ax = axes[0, 0]
         if parameters is not None and len(parameters.shape) > 1:
             # Color by first parameter
-            scatter = ax.scatter(true_amplitudes, predicted_amplitudes,
-                               c=parameters[:, 0], alpha=0.6, cmap='viridis')
-            plt.colorbar(scatter, ax=ax, label=parameter_names[0] if parameter_names else 'Parameter 0')
+            fig.add_trace(go.Scatter(
+                x=true_amplitudes,
+                y=predicted_amplitudes,
+                mode='markers',
+                marker=dict(
+                    color=parameters[:, 0],
+                    colorscale='Viridis',
+                    opacity=0.6,
+                    showscale=True,
+                    colorbar=dict(title=parameter_names[0] if parameter_names else 'Parameter 0')
+                )
+            ), row=1, col=1)
         else:
-            ax.scatter(true_amplitudes, predicted_amplitudes, alpha=0.6)
+            fig.add_trace(go.Scatter(
+                x=true_amplitudes,
+                y=predicted_amplitudes,
+                mode='markers',
+                marker=dict(opacity=0.6)
+            ), row=1, col=1)
 
         # Perfect prediction line
-        min_amp, max_amp = min(true_amplitudes.min(), predicted_amplitudes.min()), \
-                          max(true_amplitudes.max(), predicted_amplitudes.max())
-        ax.plot([min_amp, max_amp], [min_amp, max_amp], 'r--', label='Perfect Prediction')
-
-        ax.set_xlabel('True Amplitude')
-        ax.set_ylabel('Predicted Amplitude')
-        ax.set_title('Predicted vs True Amplitudes')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+        min_amp = min(true_amplitudes.min(), predicted_amplitudes.min())
+        max_amp = max(true_amplitudes.max(), predicted_amplitudes.max())
+        fig.add_trace(go.Scatter(
+            x=[min_amp, max_amp],
+            y=[min_amp, max_amp],
+            mode='lines',
+            line=dict(color='red', dash='dash'),
+            name='Perfect Prediction'
+        ), row=1, col=1)
 
         # Residuals plot
-        ax = axes[0, 1]
         residuals = predicted_amplitudes - true_amplitudes
-        ax.scatter(true_amplitudes, residuals, alpha=0.6)
-        ax.axhline(y=0, color='r', linestyle='--')
-        ax.set_xlabel('True Amplitude')
-        ax.set_ylabel('Residuals')
-        ax.set_title('Residuals vs True Amplitudes')
-        ax.grid(True, alpha=0.3)
+        fig.add_trace(go.Scatter(
+            x=true_amplitudes,
+            y=residuals,
+            mode='markers',
+            marker=dict(opacity=0.6)
+        ), row=1, col=2)
+        fig.add_hline(y=0, line=dict(color='red', dash='dash'), row=1, col=2)
 
         # Distribution comparison
-        ax = axes[1, 0]
-        ax.hist(true_amplitudes, bins=30, alpha=0.7, label='True', density=True)
-        ax.hist(predicted_amplitudes, bins=30, alpha=0.7, label='Predicted', density=True)
-        ax.set_xlabel('Amplitude')
-        ax.set_ylabel('Density')
-        ax.set_title('Amplitude Distributions')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+        fig.add_trace(go.Histogram(
+            x=true_amplitudes,
+            name='True',
+            opacity=0.7,
+            histnorm='probability density'
+        ), row=2, col=1)
+        fig.add_trace(go.Histogram(
+            x=predicted_amplitudes,
+            name='Predicted',
+            opacity=0.7,
+            histnorm='probability density'
+        ), row=2, col=1)
 
         # Error distribution
-        ax = axes[1, 1]
         relative_errors = np.abs(residuals) / (true_amplitudes + 1e-8)
-        ax.hist(relative_errors, bins=30, alpha=0.7, color='orange')
-        ax.set_xlabel('Relative Error')
-        ax.set_ylabel('Frequency')
-        ax.set_title('Relative Error Distribution')
-        ax.grid(True, alpha=0.3)
+        fig.add_trace(go.Histogram(
+            x=relative_errors,
+            name='Relative Error',
+            marker_color='orange',
+            opacity=0.7
+        ), row=2, col=2)
 
-        plt.suptitle(title, fontsize=16, fontweight='bold')
-        plt.tight_layout()
+        # Update layout
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=16, family="Arial", color="black")),
+            width=self.width,
+            height=self.height * 1.5,
+            showlegend=True,
+            template="plotly_white",
+            barmode='overlay'
+        )
+
+        # Axis labels
+        fig.update_xaxes(title_text='True Amplitude', row=1, col=1)
+        fig.update_yaxes(title_text='Predicted Amplitude', row=1, col=1)
+        fig.update_xaxes(title_text='True Amplitude', row=1, col=2)
+        fig.update_yaxes(title_text='Residuals', row=1, col=2)
+        fig.update_xaxes(title_text='Amplitude', row=2, col=1)
+        fig.update_yaxes(title_text='Density', row=2, col=1)
+        fig.update_xaxes(title_text='Relative Error', row=2, col=2)
+        fig.update_yaxes(title_text='Frequency', row=2, col=2)
 
         if save_path:
-            plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            fig.write_image(save_path)
 
         return fig
 
@@ -243,63 +348,86 @@ class VibrationVisualizer:
             title: Plot title
             save_path: Path to save figure
         """
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10), dpi=self.dpi)
+        fig = make_subplots(
+            rows=2,
+            cols=2,
+            subplot_titles=(
+                'Time Domain',
+                'Power Spectral Density',
+                'Spectrogram',
+                'Dominant Frequencies'
+            )
+        )
 
-        colors = plt.cm.tab10(np.linspace(0, 1, len(signals)))
+        colors = px.colors.qualitative.Plotly
 
         # Time domain
-        ax = axes[0, 0]
-        for signal_data, label, color in zip(signals, labels, colors):
+        for i, (signal_data, label) in enumerate(zip(signals, labels)):
             time = np.arange(len(signal_data)) / sampling_rate
-            ax.plot(time, signal_data, label=label, color=color, alpha=0.7)
-
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Amplitude')
-        ax.set_title('Time Domain')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+            fig.add_trace(go.Scatter(
+                x=time,
+                y=signal_data,
+                name=label,
+                line=dict(color=colors[i % len(colors)]),
+                opacity=0.7
+            ), row=1, col=1)
 
         # Power Spectral Density
-        ax = axes[0, 1]
-        for signal_data, label, color in zip(signals, labels, colors):
+        for i, (signal_data, label) in enumerate(zip(signals, labels)):
             freqs, psd = signal.welch(signal_data, fs=sampling_rate, nperseg=min(len(signal_data), 256))
-            ax.semilogy(freqs, psd, label=label, color=color)
-
-        ax.set_xlabel('Frequency (Hz)')
-        ax.set_ylabel('Power Spectral Density')
-        ax.set_title('Power Spectral Density')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+            fig.add_trace(go.Scatter(
+                x=freqs,
+                y=psd,
+                name=label,
+                line=dict(color=colors[i % len(colors)]),
+                mode='lines'
+            ), row=1, col=2)
 
         # Spectrogram (first signal only)
-        ax = axes[1, 0]
         if len(signals) > 0:
             freqs, times, Sxx = signal.spectrogram(signals[0], fs=sampling_rate)
-            im = ax.pcolormesh(times, freqs, 10 * np.log10(Sxx), shading='gouraud')
-            ax.set_xlabel('Time (s)')
-            ax.set_ylabel('Frequency (Hz)')
-            ax.set_title(f'Spectrogram - {labels[0]}')
-            plt.colorbar(im, ax=ax, label='Power (dB)')
+            fig.add_trace(go.Heatmap(
+                x=times,
+                y=freqs,
+                z=10 * np.log10(Sxx),
+                colorscale='Viridis',
+                name=labels[0]
+            ), row=2, col=1)
 
         # Dominant frequency comparison
-        ax = axes[1, 1]
         dominant_freqs = []
-        for signal_data, label, color in zip(signals, labels, colors):
+        for signal_data, label in zip(signals, labels):
             freqs, psd = signal.welch(signal_data, fs=sampling_rate, nperseg=min(len(signal_data), 256))
             dominant_freq = freqs[np.argmax(psd)]
             dominant_freqs.append(dominant_freq)
 
-        ax.bar(labels, dominant_freqs, color=colors, alpha=0.7)
-        ax.set_ylabel('Dominant Frequency (Hz)')
-        ax.set_title('Dominant Frequencies')
-        ax.grid(True, alpha=0.3)
-        plt.xticks(rotation=45)
+        fig.add_trace(go.Bar(
+            x=labels,
+            y=dominant_freqs,
+            marker_color=colors[:len(labels)]
+        ), row=2, col=2)
 
-        plt.suptitle(title, fontsize=16, fontweight='bold')
-        plt.tight_layout()
+        # Update layout
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=16, family="Arial", color="black")),
+            width=self.width,
+            height=self.height * 1.5,
+            showlegend=True,
+            template="plotly_white"
+        )
+
+        # Axis labels
+        fig.update_xaxes(title_text='Time (s)', row=1, col=1)
+        fig.update_yaxes(title_text='Amplitude', row=1, col=1)
+        fig.update_xaxes(title_text='Frequency (Hz)', row=1, col=2)
+        fig.update_yaxes(title_text='Power Spectral Density', row=1, col=2, type="log")
+        fig.update_xaxes(title_text='Time (s)', row=2, col=1)
+        fig.update_yaxes(title_text='Frequency (Hz)', row=2, col=1)
+        fig.update_xaxes(title_text='Signal', row=2, col=2)
+        fig.update_yaxes(title_text='Dominant Frequency (Hz)', row=2, col=2)
 
         if save_path:
-            plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            fig.write_image(save_path)
 
         return fig
 
@@ -324,50 +452,62 @@ class VibrationVisualizer:
             save_path: Path to save figure
         """
         n_params = len(parameter_names)
-        n_cols = min(3, n_params)
-        n_rows = (n_params + n_cols - 1) // n_cols
-
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows), dpi=self.dpi)
-
-        if n_params == 1:
-            axes = [axes]
-        elif n_rows == 1:
-            axes = axes.reshape(1, -1)
+        fig = make_subplots(
+            rows=(n_params + 2) // 3,
+            cols=min(3, n_params),
+            subplot_titles=[f'{prediction_name} vs {name}' for name in parameter_names]
+        )
 
         for i, param_name in enumerate(parameter_names):
-            row, col = i // n_cols, i % n_cols
-            ax = axes[row, col] if n_rows > 1 else axes[col]
+            row = (i // 3) + 1
+            col = (i % 3) + 1
 
             # Scatter plot
-            ax.scatter(parameters[:, i], predictions, alpha=0.6)
+            fig.add_trace(go.Scatter(
+                x=parameters[:, i],
+                y=predictions,
+                mode='markers',
+                marker=dict(opacity=0.6)
+            ), row=row, col=col)
 
             # Trend line
             z = np.polyfit(parameters[:, i], predictions, 1)
             p = np.poly1d(z)
             x_trend = np.linspace(parameters[:, i].min(), parameters[:, i].max(), 100)
-            ax.plot(x_trend, p(x_trend), "r--", alpha=0.8, linewidth=2)
+            fig.add_trace(go.Scatter(
+                x=x_trend,
+                y=p(x_trend),
+                mode='lines',
+                line=dict(color='red', dash='dash', width=2),
+                name='Trend'
+            ), row=row, col=col)
 
             # Correlation coefficient
             corr = np.corrcoef(parameters[:, i], predictions)[0, 1]
-            ax.text(0.05, 0.95, f'r = {corr:.3f}', transform=ax.transAxes,
-                   bbox=dict(boxstyle="round", facecolor='white', alpha=0.8))
+            fig.add_annotation(
+                x=0.05,
+                y=0.95,
+                xref=f"x{i+1}",
+                yref=f"y{i+1}",
+                text=f'r = {corr:.3f}',
+                showarrow=False,
+                bgcolor="white",
+                opacity=0.8
+            )
 
-            ax.set_xlabel(param_name)
-            ax.set_ylabel(prediction_name)
-            ax.set_title(f'{prediction_name} vs {param_name}')
-            ax.grid(True, alpha=0.3)
+            fig.update_xaxes(title_text=param_name, row=row, col=col)
+            fig.update_yaxes(title_text=prediction_name, row=row, col=col)
 
-        # Hide empty subplots
-        for i in range(n_params, n_rows * n_cols):
-            row, col = i // n_cols, i % n_cols
-            ax = axes[row, col] if n_rows > 1 else axes[col]
-            ax.set_visible(False)
-
-        plt.suptitle(title, fontsize=16, fontweight='bold')
-        plt.tight_layout()
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=16, family="Arial", color="black")),
+            width=self.width,
+            height=self.height * ((n_params + 2) // 3),
+            showlegend=False,
+            template="plotly_white"
+        )
 
         if save_path:
-            plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            fig.write_image(save_path)
 
         return fig
 
@@ -389,53 +529,66 @@ class VibrationVisualizer:
             title: Plot title
             save_path: Path to save figure
         """
-        fig, axes = plt.subplots(2, 1, figsize=self.figsize, dpi=self.dpi)
-
         if time_steps is None:
             time_steps = np.arange(len(input_sequence))
 
-        # Plot input sequence with attention overlay
-        ax = axes[0]
+        fig = make_subplots(rows=2, cols=1, subplot_titles=(
+            'Input Sequence with Attention Overlay',
+            'Attention Weights Distribution'
+        ))
 
         # Plot features
         for i in range(input_sequence.shape[1]):
-            ax.plot(time_steps, input_sequence[:, i],
-                   label=f'Feature {i}', alpha=0.7)
+            fig.add_trace(go.Scatter(
+                x=time_steps,
+                y=input_sequence[:, i],
+                name=f'Feature {i}',
+                line=dict(width=2),
+                opacity=0.7
+            ), row=1, col=1)
 
-        # Overlay attention as background color
-        ax2 = ax.twinx()
-        ax2.fill_between(time_steps, 0, attention_weights,
-                        alpha=0.3, color='red', label='Attention')
-        ax2.set_ylabel('Attention Weight')
-        ax2.set_ylim(0, attention_weights.max() * 1.1)
-
-        ax.set_xlabel('Time Step')
-        ax.set_ylabel('Feature Value')
-        ax.set_title('Input Sequence with Attention Overlay')
-        ax.legend(loc='upper left')
-        ax2.legend(loc='upper right')
-        ax.grid(True, alpha=0.3)
+        # Overlay attention as bar chart
+        fig.add_trace(go.Bar(
+            x=time_steps,
+            y=attention_weights,
+            name='Attention',
+            marker=dict(color='red', opacity=0.3),
+            showlegend=False
+        ), row=1, col=1)
 
         # Plot attention weights separately
-        ax = axes[1]
-        bars = ax.bar(time_steps, attention_weights, alpha=0.7, color='red')
+        fig.add_trace(go.Bar(
+            x=time_steps,
+            y=attention_weights,
+            name='Attention',
+            marker=dict(color='red', opacity=0.7)
+        ), row=2, col=1)
 
         # Highlight top attention weights
         top_indices = np.argsort(attention_weights)[-5:]  # Top 5
         for idx in top_indices:
-            bars[idx].set_color('darkred')
-            bars[idx].set_alpha(1.0)
+            fig.add_vrect(
+                x0=time_steps[idx]-0.5,
+                x1=time_steps[idx]+0.5,
+                fillcolor="darkred",
+                opacity=0.3,
+                line_width=0,
+                row=2, col=1
+            )
 
-        ax.set_xlabel('Time Step')
-        ax.set_ylabel('Attention Weight')
-        ax.set_title('Attention Weights Distribution')
-        ax.grid(True, alpha=0.3)
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=16, family="Arial", color="black")),
+            width=self.width,
+            height=self.height * 1.5,
+            showlegend=True,
+            template="plotly_white"
+        )
 
-        plt.suptitle(title, fontsize=14, fontweight='bold')
-        plt.tight_layout()
+        fig.update_xaxes(title_text='Time Step', row=2, col=1)
+        fig.update_yaxes(title_text='Attention Weight', row=2, col=1)
 
         if save_path:
-            plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            fig.write_image(save_path)
 
         return fig
 
@@ -466,49 +619,69 @@ class VibrationVisualizer:
         bifurcation_mask = amplitudes > bifurcation_threshold
 
         n_params = len(parameter_names)
-        fig, axes = plt.subplots(2, n_params, figsize=(5*n_params, 8), dpi=self.dpi)
-
-        if n_params == 1:
-            axes = axes.reshape(-1, 1)
+        fig = make_subplots(
+            rows=2,
+            cols=n_params,
+            subplot_titles=[f'Amplitude vs {name}' for name in parameter_names] +
+                          [f'{name} Distribution by Regime' for name in parameter_names]
+        )
 
         for i, param_name in enumerate(parameter_names):
             # Parameter vs Amplitude
-            ax = axes[0, i]
+            fig.add_trace(go.Scatter(
+                x=parameters[:, i],
+                y=amplitudes,
+                mode='markers',
+                marker=dict(
+                    color=np.where(bifurcation_mask, 'red', 'blue'),
+                    opacity=0.6
+                ),
+                showlegend=False
+            ), row=1, col=i+1)
 
-            # Plot all points
-            ax.scatter(parameters[:, i], amplitudes,
-                      c=bifurcation_mask, cmap='RdYlBu_r', alpha=0.6)
-
-            # Bifurcation threshold line
-            ax.axhline(y=bifurcation_threshold, color='red', linestyle='--',
-                      label=f'Bifurcation Threshold ({bifurcation_threshold:.2f})')
-
-            ax.set_xlabel(param_name)
-            ax.set_ylabel('Amplitude')
-            ax.set_title(f'Amplitude vs {param_name}')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
+            fig.add_hline(
+                y=bifurcation_threshold,
+                line=dict(color='red', dash='dash'),
+                annotation_text=f'Threshold: {bifurcation_threshold:.2f}',
+                row=1, col=i+1
+            )
 
             # Parameter distribution for bifurcation/stable regions
-            ax = axes[1, i]
-
             stable_params = parameters[~bifurcation_mask, i]
             bifurc_params = parameters[bifurcation_mask, i]
 
-            ax.hist(stable_params, bins=30, alpha=0.7, label='Stable', density=True)
-            ax.hist(bifurc_params, bins=30, alpha=0.7, label='Bifurcation', density=True)
+            fig.add_trace(go.Histogram(
+                x=stable_params,
+                name='Stable',
+                opacity=0.7,
+                histnorm='probability density',
+                marker_color='blue'
+            ), row=2, col=i+1)
 
-            ax.set_xlabel(param_name)
-            ax.set_ylabel('Density')
-            ax.set_title(f'{param_name} Distribution by Regime')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
+            fig.add_trace(go.Histogram(
+                x=bifurc_params,
+                name='Bifurcation',
+                opacity=0.7,
+                histnorm='probability density',
+                marker_color='red'
+            ), row=2, col=i+1)
 
-        plt.suptitle(title, fontsize=16, fontweight='bold')
-        plt.tight_layout()
+            fig.update_xaxes(title_text=param_name, row=1, col=i+1)
+            fig.update_yaxes(title_text='Amplitude', row=1, col=i+1)
+            fig.update_xaxes(title_text=param_name, row=2, col=i+1)
+            fig.update_yaxes(title_text='Density', row=2, col=i+1)
+
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=16, family="Arial", color="black")),
+            width=self.width * n_params,
+            height=self.height * 2,
+            showlegend=True,
+            template="plotly_white",
+            barmode='overlay'
+        )
 
         if save_path:
-            plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            fig.write_image(save_path)
 
         return fig
 
@@ -534,64 +707,65 @@ class VibrationVisualizer:
         bifurcation_metrics = {k: v for k, v in metrics_dict.items()
                              if 'bifurcation' in k.lower()}
 
-        fig, axes = plt.subplots(2, 2, figsize=(15, 10), dpi=self.dpi)
+        fig = make_subplots(
+            rows=2,
+            cols=2,
+            specs=[[{"type": "bar"}, {"type": "bar"}],
+                   [{"type": "bar"}, {"type": "scatterpolar"}]],
+            subplot_titles=(
+                'Trajectory Prediction Metrics',
+                'Amplitude Prediction Metrics',
+                'Bifurcation Detection Metrics',
+                'Overall Performance Radar'
+            )
+        )
 
         # Trajectory metrics
         if trajectory_metrics:
-            ax = axes[0, 0]
             metrics_names = list(trajectory_metrics.keys())
             metrics_values = list(trajectory_metrics.values())
 
-            bars = ax.bar(range(len(metrics_names)), metrics_values, alpha=0.7)
-            ax.set_xticks(range(len(metrics_names)))
-            ax.set_xticklabels(metrics_names, rotation=45, ha='right')
-            ax.set_ylabel('Metric Value')
-            ax.set_title('Trajectory Prediction Metrics')
-            ax.grid(True, alpha=0.3)
+            colors = ['lightcoral' if ('rmse' in name.lower() or 'mae' in name.lower()) and value > 0.1
+                     else 'lightgreen' if ('r2' in name.lower() and value > 0.8) or
+                                         (('rmse' in name.lower() or 'mae' in name.lower()) and value <= 0.1)
+                     else 'yellow' for name, value in zip(metrics_names, metrics_values)]
 
-            # Color bars based on performance (lower is better for RMSE/MAE)
-            for i, (name, bar) in enumerate(zip(metrics_names, bars)):
-                if any(x in name.lower() for x in ['rmse', 'mae']):
-                    bar.set_color('lightcoral' if metrics_values[i] > 0.1 else 'lightgreen')
-                else:  # R2 - higher is better
-                    bar.set_color('lightgreen' if metrics_values[i] > 0.8 else 'lightcoral')
+            fig.add_trace(go.Bar(
+                x=metrics_names,
+                y=metrics_values,
+                marker_color=colors,
+                opacity=0.7
+            ), row=1, col=1)
 
         # Amplitude metrics
         if amplitude_metrics:
-            ax = axes[0, 1]
             metrics_names = list(amplitude_metrics.keys())
             metrics_values = list(amplitude_metrics.values())
 
-            ax.bar(range(len(metrics_names)), metrics_values, alpha=0.7, color='orange')
-            ax.set_xticks(range(len(metrics_names)))
-            ax.set_xticklabels(metrics_names, rotation=45, ha='right')
-            ax.set_ylabel('Metric Value')
-            ax.set_title('Amplitude Prediction Metrics')
-            ax.grid(True, alpha=0.3)
+            fig.add_trace(go.Bar(
+                x=metrics_names,
+                y=metrics_values,
+                marker_color='orange',
+                opacity=0.7
+            ), row=1, col=2)
 
         # Bifurcation metrics
         if bifurcation_metrics:
-            ax = axes[1, 0]
             metrics_names = list(bifurcation_metrics.keys())
             metrics_values = list(bifurcation_metrics.values())
 
-            bars = ax.bar(range(len(metrics_names)), metrics_values, alpha=0.7, color='purple')
-            ax.set_xticks(range(len(metrics_names)))
-            ax.set_xticklabels(metrics_names, rotation=45, ha='right')
-            ax.set_ylabel('Metric Value')
-            ax.set_title('Bifurcation Detection Metrics')
-            ax.set_ylim(0, 1)
-            ax.grid(True, alpha=0.3)
+            colors = ['lightgreen' if value > 0.7
+                     else 'yellow' if value > 0.5
+                     else 'lightcoral' for value in metrics_values]
 
-            # Add performance indicators
-            for i, (name, value, bar) in enumerate(zip(metrics_names, metrics_values, bars)):
-                color = 'lightgreen' if value > 0.7 else 'yellow' if value > 0.5 else 'lightcoral'
-                bar.set_color(color)
+            fig.add_trace(go.Bar(
+                x=metrics_names,
+                y=metrics_values,
+                marker_color=colors,
+                opacity=0.7
+            ), row=2, col=1)
 
         # Overall performance radar chart
-        ax = axes[1, 1]
-
-        # Select key metrics for radar chart
         key_metrics = {}
         if 'rmse_overall' in metrics_dict:
             key_metrics['RMSE'] = 1 - min(metrics_dict['rmse_overall'], 1)  # Invert for radar
@@ -603,27 +777,24 @@ class VibrationVisualizer:
             key_metrics['Bifurc F1'] = metrics_dict['bifurcation_f1']
 
         if key_metrics:
-            # Create radar chart
-            angles = np.linspace(0, 2*np.pi, len(key_metrics), endpoint=False)
-            values = list(key_metrics.values())
+            fig.add_trace(go.Scatterpolar(
+                r=list(key_metrics.values()),
+                theta=list(key_metrics.keys()),
+                fill='toself',
+                name='Performance'
+            ), row=2, col=2)
+            fig.update_polars(radialaxis=dict(visible=True, range=[0, 1]), row=2, col=2)
 
-            # Close the plot
-            angles = np.concatenate((angles, [angles[0]]))
-            values = values + [values[0]]
-
-            ax.plot(angles, values, 'o-', linewidth=2, color='blue')
-            ax.fill(angles, values, alpha=0.25, color='blue')
-            ax.set_xticks(angles[:-1])
-            ax.set_xticklabels(key_metrics.keys())
-            ax.set_ylim(0, 1)
-            ax.set_title('Overall Performance')
-            ax.grid(True)
-
-        plt.suptitle(title, fontsize=16, fontweight='bold')
-        plt.tight_layout()
+        fig.update_layout(
+            title=dict(text=title, font=dict(size=16, family="Arial", color="black")),
+            width=self.width,
+            height=self.height * 1.5,
+            showlegend=False,
+            template="plotly_white"
+        )
 
         if save_path:
-            plt.savefig(save_path, dpi=self.dpi, bbox_inches='tight')
+            fig.write_image(save_path)
 
         return fig
 
@@ -632,7 +803,7 @@ def create_training_dashboard(
     training_history: Dict,
     metrics_history: Dict,
     save_path: Optional[str] = None
-) -> plt.Figure:
+):
     """
     Create a comprehensive training dashboard.
 
@@ -644,6 +815,7 @@ def create_training_dashboard(
     Returns:
         Figure object
     """
+    import matplotlib.pyplot as plt
     fig = plt.figure(figsize=(20, 12))
 
     # Create grid layout

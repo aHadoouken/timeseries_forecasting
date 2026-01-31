@@ -6,14 +6,28 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR, StepLR
 import numpy as np
+from collections import defaultdict
 import os
 import time
 from typing import Dict, Optional, Tuple, List
 import logging
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from IPython.display import display, clear_output
+import matplotlib
+
+# Try to use interactive backend if available
+try:
+    import IPython
+
+    if IPython.get_ipython() is not None:
+        # We're in Jupyter/IPython environment
+        matplotlib.use("module://ipykernel.pylab.backend_inline")
+except:
+    # Use default backend
+    pass
 
 from training.losses import CombinedLoss, TrajectoryLoss
 from training.metrics import VibrationMetrics, MetricsTracker
@@ -34,6 +48,7 @@ class Trainer:
         train_loader: DataLoader,
         val_loader: DataLoader,
         config: Dict,
+        const_parameters: Dict,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
         """
@@ -51,6 +66,7 @@ class Trainer:
         self.val_loader = val_loader
         self.config = config
         self.device = device
+        self.const_parameters = const_parameters
 
         # Training parameters
         # Convert config values to appropriate types
@@ -59,11 +75,31 @@ class Trainer:
         self.weight_decay = float(config.get("weight_decay", 1e-5))
         self.gradient_clipping = float(config.get("gradient_clipping", 1.0))
         self.early_stopping_patience = config.get("early_stopping_patience", 15)
+        self.pretrain_val = config.get("pretrain_val", True)
+
+        # Scheduled Sampling parameters
+        self.use_scheduled_sampling = config.get("scheduled_sampling", {}).get(
+            "enabled", True
+        )
+        self.initial_teacher_forcing_ratio = config.get("scheduled_sampling", {}).get(
+            "initial_ratio", 1.0
+        )
+        self.teacher_forcing_decay = config.get("scheduled_sampling", {}).get(
+            "decay_rate", 0.99
+        )
+        self.min_teacher_forcing_ratio = config.get("scheduled_sampling", {}).get(
+            "min_ratio", 0.1
+        )
+        self.current_teacher_forcing_ratio = self.initial_teacher_forcing_ratio
 
         # Logging parameters
         self.log_interval = config.get("log_interval", 10)
         self.save_interval = config.get("save_interval", 50)
         self.plot_predictions = config.get("plot_predictions", True)
+        self.plot_realtime = config.get("plot_realtime", True)
+        self.plot_update_interval = config.get(
+            "plot_update_interval", 1
+        )  # Update plot every N epochs
 
         # Initialize optimizer
         self.optimizer = self._create_optimizer()
@@ -72,11 +108,11 @@ class Trainer:
         self.scheduler = self._create_scheduler()
 
         # Initialize loss function
-        # loss_weights = config.get('loss', {}).get('weights', {
-        #     'trajectory': 1.0, 'amplitude': 2.0, 'stability': 0.5, 'physics': 0.1
-        # })
-        # self.criterion = CombinedLoss(loss_weights)
-        self.criterion = TrajectoryLoss(loss_type="mse")
+        loss_weights = config.get('loss', {}).get('weights', {
+            'trajectory': 0.5, 'physics': 0.5
+        })
+        self.criterion = CombinedLoss(loss_weights)
+        # self.criterion = TrajectoryLoss(loss_type="mse")
 
         # Initialize metrics
         self.train_metrics = VibrationMetrics()
@@ -99,7 +135,18 @@ class Trainer:
             "val_loss": [],
             "train_metrics": {},
             "val_metrics": {},
+            "learning_rates": [],
+            "teacher_forcing_ratios": [],
+            "step_losses": [],  # Initialize step_losses list
+            "loss_components": defaultdict(list),
+            "step_loss_components": defaultdict(list),
         }
+
+        # Real-time plotting setup
+        self.fig = None
+        self.axes = None
+        self.loss_lines = None
+        self.is_notebook = self._check_notebook_environment()
 
         # Create output directory
         self.output_dir = config.get("output_dir", "outputs")
@@ -107,6 +154,270 @@ class Trainer:
 
         logger.info(f"Trainer initialized on device: {device}")
         logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+        # Initialize real-time plot if enabled
+        if self.plot_realtime:
+            self._init_realtime_plot()
+
+    def _check_notebook_environment(self) -> bool:
+        """
+        Check if we're running in a notebook environment.
+        """
+        try:
+            import IPython
+
+            return IPython.get_ipython() is not None
+        except:
+            return False
+
+    def _init_realtime_plot(self):
+        """
+        Initialize the real-time loss plotting figure.
+        """
+        if self.is_notebook:
+            # Use inline plotting for notebooks
+            plt.ioff()  # Turn off interactive mode for notebooks
+        else:
+            # Use interactive mode for regular Python scripts
+            plt.ion()
+
+        self.fig, self.axes = plt.subplots(2, 2, figsize=(12, 8))
+        self.fig.suptitle("Training Progress", fontsize=14, fontweight="bold")
+
+        # Initialize empty plots
+        self.loss_lines = {}
+
+        # Loss plot
+        (self.loss_lines["train_loss"],) = self.axes[0, 0].plot(
+            [], [], "b-", label="Train Loss", linewidth=0.5
+        )
+        (self.loss_lines["train_loss_traj"],) = self.axes[0, 0].plot(
+            [], [], "c-", label="Train Loss Traj", linewidth=0.5
+        )
+        (self.loss_lines["train_loss_physics"],) = self.axes[0, 0].plot(
+            [], [], "g-", label="Train Loss Physics", linewidth=0.5
+        )
+
+        (self.loss_lines["val_loss"],) = self.axes[0, 0].plot(
+            [], [], "r-", label="Val Loss", linewidth=0.5
+        )
+        self.axes[0, 0].set_title("Loss Curves")
+        self.axes[0, 0].set_xlabel("Epoch")
+        self.axes[0, 0].set_ylabel("Loss")
+        self.axes[0, 0].legend()
+        self.axes[0, 0].grid(True, alpha=0.3)
+
+        # Loss difference plot (train - val)
+        (self.loss_lines["log_train_loss"],) = self.axes[0, 1].plot(
+            [], [], "b-", label="Log Train Loss", linewidth=0.5
+        )
+        (self.loss_lines["log_train_loss_traj"],) = self.axes[0, 1].plot(
+            [], [], "c-", label="Train Loss Traj", linewidth=0.5
+        )
+        (self.loss_lines["log_train_loss_physics"],) = self.axes[0, 1].plot(
+            [], [], "g-", label="Train Loss Physics", linewidth=0.5
+        )
+        (self.loss_lines["log_val_loss"],) = self.axes[0, 1].plot(
+            [], [], "r-", label="LogVal Loss", linewidth=0.5
+        )
+        self.axes[0, 1].set_title("Log Loss Curves")
+        self.axes[0, 1].set_xlabel("Epoch")
+        self.axes[0, 1].set_ylabel("Loss")
+        self.axes[0, 1].set_yscale("log")
+        self.axes[0, 1].legend()
+        self.axes[0, 1].grid(True, alpha=0.3)
+
+        # Learning rate plot
+        (self.loss_lines["lr"],) = self.axes[1, 1].plot([], [], "g-", linewidth=0.5)
+        self.axes[1, 1].set_title("Learning Rate")
+        self.axes[1, 1].set_xlabel("Epoch")
+        self.axes[1, 1].set_ylabel("Learning Rate")
+        self.axes[1, 1].set_yscale("log")
+        self.axes[1, 1].grid(True, alpha=0.3)
+
+        # Teacher forcing ratio plot (if using scheduled sampling)
+        (self.loss_lines["step_losses"],) = self.axes[1, 0].plot(
+            [], [], "b-", linewidth=0.5
+        )
+        (self.loss_lines["step_losses_traj"],) = self.axes[1, 0].plot(
+            [], [], "c-", linewidth=0.5
+        )
+        (self.loss_lines["step_losses_physics"],) = self.axes[1, 0].plot(
+            [], [], "g-", linewidth=0.5
+        )
+        self.axes[1, 0].set_title("Train step losses")
+        self.axes[1, 0].set_xlabel("Step")
+        self.axes[1, 0].set_ylabel("Loss")
+        self.axes[1, 0].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+
+        if not self.is_notebook:
+            plt.show(block=False)
+            plt.pause(0.1)
+
+    def _update_realtime_plot(self, epoch: int):
+        """
+        Update the real-time loss plot with new data.
+        """
+        if not self.plot_realtime or self.fig is None:
+            return
+
+        # Only update every N epochs to reduce overhead
+        if epoch % self.plot_update_interval != 0 and epoch != self.epochs - 1:
+            return
+
+        epochs = list(range(len(self.training_history["train_loss"])))
+        steps = list(range(len(self.training_history["step_losses"])))
+
+        # Update loss curves
+        if self.training_history["train_loss"]:
+            self.loss_lines["train_loss"].set_data(
+                epochs, self.training_history["train_loss"]
+            )
+            self.axes[0, 0].relim()
+            self.axes[0, 0].autoscale_view()
+
+        if self.training_history["loss_components"]:
+            if "trajectory" in self.training_history["loss_components"]:
+                self.loss_lines["train_loss_traj"].set_data(
+                    epochs, self.training_history["loss_components"]["trajectory"]
+                )
+                self.axes[0, 0].relim()
+                self.axes[0, 0].autoscale_view()
+            if "physics" in self.training_history["loss_components"]:
+                self.loss_lines["train_loss_physics"].set_data(
+                    epochs, self.training_history["loss_components"]["physics"]
+                )
+                self.axes[0, 0].relim()
+                self.axes[0, 0].autoscale_view()
+
+        if self.training_history["val_loss"]:
+            self.loss_lines["val_loss"].set_data(
+                epochs, self.training_history["val_loss"]
+            )
+            self.axes[0, 0].relim()
+            self.axes[0, 0].autoscale_view()
+
+        # Update log loss curves
+        if self.training_history["train_loss"]:
+            self.loss_lines["log_train_loss"].set_data(
+                epochs, (self.training_history["train_loss"])
+            )
+            self.axes[0, 1].relim()
+            self.axes[0, 1].autoscale_view()
+
+        if self.training_history["loss_components"]:
+            if "trajectory" in self.training_history["loss_components"]:
+                self.loss_lines["log_train_loss_traj"].set_data(
+                    epochs, self.training_history["loss_components"]["trajectory"]
+                )
+                self.axes[0, 1].relim()
+                self.axes[0, 1].autoscale_view()
+            if "physics" in self.training_history["loss_components"]:
+                self.loss_lines["log_train_loss_physics"].set_data(
+                    epochs, self.training_history["loss_components"]["physics"]
+                )
+                self.axes[0, 1].relim()
+                self.axes[0, 1].autoscale_view()
+
+        if self.training_history["val_loss"]:
+            self.loss_lines["log_val_loss"].set_data(
+                epochs, (self.training_history["val_loss"])
+            )
+            self.axes[0, 1].relim()
+            self.axes[0, 1].autoscale_view()
+
+        # Update learning rate
+        if self.training_history["learning_rates"]:
+            self.loss_lines["lr"].set_data(
+                epochs, self.training_history["learning_rates"]
+            )
+            self.axes[1, 1].relim()
+            self.axes[1, 1].autoscale_view()
+
+        # Update step losses plot
+        if self.training_history["step_losses"]:
+            self.loss_lines["step_losses"].set_data(
+                steps, self.training_history["step_losses"]
+            )
+            self.axes[1, 0].relim()
+            self.axes[1, 0].autoscale_view()
+
+        if self.training_history["step_loss_components"]:
+            if "trajectory" in self.training_history["step_loss_components"]:
+                self.loss_lines["step_losses_traj"].set_data(
+                    steps, self.training_history["step_loss_components"]["trajectory"]
+                )
+                self.axes[1, 0].relim()
+                self.axes[1, 0].autoscale_view()
+            if "physics" in self.training_history["step_loss_components"]:
+                self.loss_lines["step_losses_physics"].set_data(
+                    steps, self.training_history["step_loss_components"]["physics"]
+                )
+                self.axes[0, 0].relim()
+                self.axes[0, 0].autoscale_view()
+
+        # Update loss difference
+        # if len(self.training_history['train_loss']) > 0 and len(self.training_history['val_loss']) > 0:
+        #     loss_diff = [t - v for t, v in zip(self.training_history['train_loss'],
+        #                                       self.training_history['val_loss'])]
+        #     self.loss_lines['loss_diff'].set_data(epochs, loss_diff)
+        #     self.axes[1, 1].relim()
+        #     self.axes[1, 1].autoscale_view()
+
+        # Add best model marker
+        if self.best_val_loss < float("inf"):
+            best_epoch = self.training_history["val_loss"].index(
+                min(self.training_history["val_loss"])
+            )
+            # Remove old markers
+            for ax in self.axes.flat:
+                for artist in ax.collections[:]:
+                    if hasattr(artist, "_is_best_marker"):
+                        artist.remove()
+            # Add new marker on loss plot
+            marker = self.axes[0, 0].scatter(
+                best_epoch,
+                self.best_val_loss,
+                color="green",
+                s=100,
+                marker="*",
+                zorder=5,
+                label=f"Best (epoch {best_epoch})",
+            )
+            marker._is_best_marker = True
+
+            # Update legend to show best loss
+            handles, labels = self.axes[0, 0].get_legend_handles_labels()
+            # Filter out old best markers from legend
+            new_handles = []
+            new_labels = []
+            for h, l in zip(handles, labels):
+                if not l.startswith("Best"):
+                    new_handles.append(h)
+                    new_labels.append(l)
+            new_handles.append(marker)
+            new_labels.append(f"Best (epoch {best_epoch})")
+            self.axes[0, 0].legend(new_handles, new_labels)
+
+        # Update title with current epoch info
+        self.fig.suptitle(
+            f"Training Progress - Epoch {epoch+1}/{self.epochs}",
+            fontsize=14,
+            fontweight="bold",
+        )
+
+        # Refresh plot
+        if self.is_notebook:
+            # For Jupyter notebooks
+            clear_output(wait=True)
+            display(self.fig)
+        else:
+            # For regular Python scripts
+            self.fig.canvas.draw()
+            self.fig.canvas.flush_events()
+            plt.pause(0.01)
 
     def _create_optimizer(self) -> optim.Optimizer:
         """
@@ -154,6 +465,12 @@ class Trainer:
             return CosineAnnealingLR(
                 self.optimizer, T_max=self.epochs, eta_min=self.learning_rate * 0.01
             )
+        elif scheduler_type == "steplr":
+            return StepLR(
+                self.optimizer,
+                step_size=self.config.get("scheduler_patience", 10),
+                gamma=self.config.get("scheduler_factor", 0.5),
+            )
         elif scheduler_type == "none":
             return None
         else:
@@ -168,9 +485,15 @@ class Trainer:
 
         total_loss = 0.0
         total_samples = 0
-        loss_components = {}
+        total_batches = 0
+        total_loss_components = defaultdict(float)
+        step_losses = []
+        step_loss_components = defaultdict(list)
 
-        progress_bar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch}")
+        progress_bar = tqdm(
+            self.train_loader,
+            desc=f"Epoch {self.current_epoch} (TF: {self.current_teacher_forcing_ratio:.3f}, LR: {self.optimizer.param_groups[0]['lr']:.6f})",
+        )
 
         for batch_idx, batch in enumerate(progress_bar):
             # Move batch to device
@@ -190,16 +513,27 @@ class Trainer:
             # Zero gradients
             self.optimizer.zero_grad()
 
-            # Forward pass
-            outputs = self.model(batch)["trajectory"]
+            # Forward pass with scheduled sampling if enabled
+            if self.use_scheduled_sampling and hasattr(
+                self.model, "forward_with_scheduled_sampling"
+            ):
+                outputs = self.model.forward_with_scheduled_sampling(
+                    batch, teacher_forcing_ratio=self.current_teacher_forcing_ratio
+                )
+                # forward_with_scheduled_sampling also has shift: each prediction is for the next step
+                # So we need to exclude the last prediction which goes beyond targets
+            else:
+                # Standard forward pass
+                outputs = self.model(batch)
+            predictions = outputs["trajectory"][:, seq_len - 1 : -1, :]
 
-            predictions = outputs[:, seq_len - 1:-1, :]
             targets = batch["targets"]
 
             # Compute loss
-            loss = self.criterion(
+            loss, losses = self.criterion(
                 predictions,
                 targets,
+                self.const_parameters
             )
 
             # Backward pass
@@ -215,47 +549,51 @@ class Trainer:
             self.optimizer.step()
 
             # Update metrics
-            # batch_size = batch['features'].shape[0]
-            total_loss += loss.item() * batch_size
+            total_loss += loss.item()
+            step_losses.append(loss.item())
+            total_batches += 1
             total_samples += batch_size
 
-            # Accumulate loss components
-            # for key, value in individual_losses.items():
-            #     if key not in loss_components:
-            #         loss_components[key] = 0.0
-            #     loss_components[key] += value.item() * batch_size
+            for name, val in losses.items():
+                total_loss_components[name] += val.item()
+                step_loss_components[name].append(val.item())
 
             # Update training metrics
             # if "trajectory" in outputs:
             self.train_metrics.update(
                 predictions=predictions,
                 targets=targets,
-                # amplitudes_pred=outputs.get("amplitude"),
-                # amplitudes_true=batch.get("max_amplitude"),
-                # parameters=batch["parameters"],
-                # trajectory_ids=batch.get("trajectory_id"),
             )
 
             # Update progress bar
             progress_bar.set_postfix(
                 {
                     "loss": f"{loss.item():.4f}",
-                    "avg_loss": f"{total_loss/total_samples:.4f}",
+                    "avg_loss": f"{total_loss/total_batches:.4f}",
+                    "TF_ratio": f"{self.current_teacher_forcing_ratio:.3f}",
+                    "LR": f"{self.optimizer.param_groups[0]['lr']:.6f}",
                 }
             )
 
             # Log batch metrics
-            if batch_idx % self.log_interval == 0:
-                logger.debug(f"Batch {batch_idx}: loss={loss.item():.4f}")
+            # if batch_idx % self.log_interval == 0:
+            #     logger.debug(f"Batch {batch_idx}: loss={loss.item():.4f}, TF_ratio={self.current_teacher_forcing_ratio:.3f}")
 
         # Compute epoch metrics
-        avg_loss = total_loss / total_samples
-        # avg_loss_components = {k: v / total_samples for k, v in loss_components.items()}
+        avg_loss = total_loss / total_batches
+        avg_loss_components = {k: v / total_samples for k, v in total_loss_components.items()}
 
         # Compute detailed metrics
         detailed_metrics = self.train_metrics.compute_all_metrics()
 
-        epoch_metrics = {"loss": avg_loss, **detailed_metrics}
+        epoch_metrics = {
+            "step_losses": step_losses,
+            "loss": avg_loss,
+            "teacher_forcing_ratio": self.current_teacher_forcing_ratio,
+            "step_loss_components": step_loss_components,
+            "loss_components": avg_loss_components,
+            **detailed_metrics,
+        }
 
         return epoch_metrics
 
@@ -268,7 +606,10 @@ class Trainer:
 
         total_loss = 0.0
         total_samples = 0
-        loss_components = {}
+        total_batches = 0
+        total_loss_components = defaultdict(float)
+        step_losses = []
+        step_loss_components = defaultdict(list)
 
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc="Validation"):
@@ -285,43 +626,40 @@ class Trainer:
                 # Forward pass
                 outputs = self.model(batch)
 
-                predictions = outputs["trajectory"][:, seq_len - 1:-1, :]
+                predictions = outputs["trajectory"][:, seq_len - 1 : -1, :]
                 targets = batch["targets"]
 
                 # Compute loss
-                loss = self.criterion(
+                loss, losses = self.criterion(
                     predictions,
                     targets,
+                    self.const_parameters
                 )
 
                 # Update metrics
-                total_loss += loss.item() * batch_size
+                total_loss += loss.item()
+                total_batches += 1
                 total_samples += batch_size
 
-                # Accumulate loss components
-                # for key, value in individual_losses.items():
-                #     if key not in loss_components:
-                #         loss_components[key] = 0.0
-                #     loss_components[key] += value.item() * batch_size
+                for name, val in losses.items():
+                    total_loss_components[name] += val.item()
+                    step_loss_components[name].append(val.item())
 
                 # Update validation metrics
                 self.val_metrics.update(
                     predictions=predictions,
                     targets=targets,
-                    # amplitudes_pred=outputs.get("amplitude"),
-                    # amplitudes_true=batch.get("max_amplitude"),
-                    # parameters=batch["parameters"],
-                    # trajectory_ids=batch.get("trajectory_id"),
                 )
 
         # Compute epoch metrics
-        avg_loss = total_loss / total_samples
+        avg_loss = total_loss / total_batches
+        avg_loss_components = {k: v / total_samples for k, v in total_loss_components.items()}
         # avg_loss_components = {k: v / total_samples for k, v in loss_components.items()}
 
         # Compute detailed metrics
         detailed_metrics = self.val_metrics.compute_all_metrics()
 
-        epoch_metrics = {"loss": avg_loss, **detailed_metrics}
+        epoch_metrics = {"loss": avg_loss, "loss_components": avg_loss_components, **detailed_metrics}
 
         return epoch_metrics
 
@@ -333,6 +671,14 @@ class Trainer:
 
         start_time = time.time()
         epochs_without_improvement = 0
+        if self.pretrain_val:
+            val_metrics = self.validate_epoch()
+            for metric_name, metric_value in val_metrics.items():
+                if isinstance(metric_value, float):
+                    print(f"{metric_name}: {metric_value:.4f}")
+                elif isinstance(metric_value, dict):
+                    for submetric_name, submetric_value in metric_value.items():
+                        print(f"{metric_name}.{submetric_name}: {submetric_value:.4f}")
 
         for epoch in range(self.epochs):
             self.current_epoch = epoch
@@ -342,6 +688,13 @@ class Trainer:
 
             # Validate epoch
             val_metrics = self.validate_epoch()
+
+            # Update teacher forcing ratio for scheduled sampling
+            if self.use_scheduled_sampling:
+                self.current_teacher_forcing_ratio = max(
+                    self.min_teacher_forcing_ratio,
+                    self.current_teacher_forcing_ratio * self.teacher_forcing_decay,
+                )
 
             # Update learning rate scheduler
             if self.scheduler is not None:
@@ -354,8 +707,24 @@ class Trainer:
             self.metrics_tracker.update(epoch, train_metrics, val_metrics)
 
             # Update training history
+            self.training_history["step_losses"].extend(train_metrics["step_losses"])
             self.training_history["train_loss"].append(train_metrics["loss"])
+            for name, val in train_metrics["loss_components"].items():
+                self.training_history[f"loss_components"][name].append(val)
+
+            for name, val in train_metrics["step_loss_components"].items():
+                self.training_history[f"step_loss_components"][name].extend(val)
             self.training_history["val_loss"].append(val_metrics["loss"])
+            self.training_history["learning_rates"].append(
+                self.optimizer.param_groups[0]["lr"]
+            )
+            if self.use_scheduled_sampling:
+                self.training_history["teacher_forcing_ratios"].append(
+                    self.current_teacher_forcing_ratio
+                )
+
+            # Update real-time plot
+            self._update_realtime_plot(epoch)
 
             # Check for best model
             if val_metrics["loss"] < self.best_val_loss:
@@ -369,23 +738,28 @@ class Trainer:
                 epochs_without_improvement += 1
 
             # Log epoch results
-            logger.info(
+            log_msg = (
                 f"Epoch {epoch:3d}: "
                 f"Train Loss: {train_metrics['loss']:.6f}, "
                 f"Val Loss: {val_metrics['loss']:.6f}, "
                 f"LR: {self.optimizer.param_groups[0]['lr']:.2e}"
             )
+            if self.use_scheduled_sampling:
+                log_msg += f", TF Ratio: {self.current_teacher_forcing_ratio:.3f}"
+            print(log_msg)
 
             # Print detailed metrics periodically
-            if epoch % (self.log_interval * 5) == 0:
+            if epoch % (self.log_interval) == 0:
                 print(f"\nEpoch {epoch} Detailed Metrics:")
                 print("-" * 40)
 
                 # Print key metrics
-                key_metrics = ["rmse_overall", "amplitude_rmse", "bifurcation_f1"]
-                for metric in key_metrics:
-                    if metric in val_metrics:
-                        print(f"{metric:20s}: {val_metrics[metric]:.6f}")
+                for metric_name, metric_value in val_metrics.items():
+                    if isinstance(metric_value, float):
+                        print(f"{metric_name:20s}: Train: {train_metrics[metric_name]:.6f}, Val: {metric_value:.6f}")
+                    elif isinstance(metric_value, dict):
+                        for submetric_name, submetric_value in metric_value.items():
+                            print(f"{metric_name}.{submetric_name:20s}: Train: {train_metrics[metric_name][submetric_name]:.6f}, Val: {submetric_value:.6f}")
 
             # Save checkpoint periodically
             if epoch % self.save_interval == 0:
@@ -416,6 +790,10 @@ class Trainer:
 
         # Save final results
         self.save_training_results()
+
+        # Close real-time plot if it was open
+        if self.plot_realtime and self.fig is not None and not self.is_notebook:
+            plt.close(self.fig)
 
         return {
             "best_val_loss": self.best_val_loss,

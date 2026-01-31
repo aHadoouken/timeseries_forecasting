@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from typing import Dict, Tuple, Optional
 import math
 import logging
+import numpy as np
 
 from .base_model import BaseVibrationModel, ModelFactory
 
@@ -63,10 +64,14 @@ class AttentionMechanism(nn.Module):
         """
         # Compute attention scores
         attention_scores = self.attention(lstm_output)  # [batch_size, seq_len, 1]
-        attention_weights = F.softmax(attention_scores, dim=1)  # [batch_size, seq_len, 1]
+        attention_weights = F.softmax(
+            attention_scores, dim=1
+        )  # [batch_size, seq_len, 1]
 
         # Apply attention
-        attended_output = torch.sum(lstm_output * attention_weights, dim=1)  # [batch_size, hidden_size]
+        attended_output = torch.sum(
+            lstm_output * attention_weights, dim=1
+        )  # [batch_size, hidden_size]
 
         return attended_output, attention_weights.squeeze(-1)
 
@@ -86,24 +91,18 @@ class LSTMPredictor(BaseVibrationModel):
         super().__init__(config)
 
         # Model parameters
-        self.input_size = config.get('input_size', 2)  # x, x_dot
-        self.hidden_size = config.get('hidden_size', 128)
-        self.num_layers = config.get('num_layers', 2)
-        self.dropout = config.get('dropout', 0.2)
-        self.recurrent_dropout = config.get('recurrent_dropout', 0.2)
-        self.bidirectional = config.get('bidirectional', False)
-
-        # Parameter embedding
-        # self.n_params = config.get('n_params', 15)  # Number of system parameters
-        # self.param_embedding_dim = config.get('parameter_embedding_dim', 32)
+        self.input_size = config.get("input_size", 2)  # x, x_dot
+        self.hidden_size = config.get("hidden_size", 128)
+        self.num_layers = config.get("num_layers", 2)
+        self.dropout = config.get("dropout", 0.2)
+        self.recurrent_dropout = config.get("recurrent_dropout", 0.2)
+        self.bidirectional = config.get("bidirectional", False)
 
         # Output configuration
-        self.output_size = config.get('output_size', 2)  # x, x_dot
-        self.output_layers = config.get('output_layers', [128, 64])
-        self.output_activation = config.get('output_activation', 'tanh')
-
-        # Normalization
-        self.input_normalization = config.get('input_normalization', 'z_score')
+        self.output_size = config.get("output_size", 2)  # x, x_dot
+        self.output_layers = config.get("output_layers", [128, 64])
+        self.output_activation = config.get("output_activation", "tanh")
+        self.teacher_forcing_noise_std = config.get("teacher_forcing_noise_std", 0.0)
 
         # Build model components
         self._build_model()
@@ -117,17 +116,8 @@ class LSTMPredictor(BaseVibrationModel):
         """
         Build model architecture.
         """
-        # Parameter embedding
-        # self.param_embedding = ParameterEmbedding(
-        #     self.n_params,
-        #     self.param_embedding_dim
-        # )
-
         # Input projection (combine features with parameter embedding)
-        self.input_projection = nn.Linear(
-            self.input_size,
-            self.hidden_size
-        )
+        self.input_projection = nn.Linear(self.input_size, self.hidden_size)
 
         # LSTM layers
         self.lstm = nn.LSTM(
@@ -136,73 +126,39 @@ class LSTMPredictor(BaseVibrationModel):
             num_layers=self.num_layers,
             dropout=self.recurrent_dropout if self.num_layers > 1 else 0,
             bidirectional=self.bidirectional,
-            batch_first=True
+            batch_first=True,
         )
 
         # Attention mechanism
         lstm_output_size = self.hidden_size * (2 if self.bidirectional else 1)
-        # self.attention = AttentionMechanism(lstm_output_size)
 
         # Output layers
         output_layers = []
         prev_size = lstm_output_size
 
         for layer_size in self.output_layers:
-            output_layers.extend([
-                nn.Linear(prev_size, layer_size),
-                nn.LayerNorm(layer_size),
-                nn.ReLU(),
-                nn.Dropout(self.dropout)
-            ])
+            output_layers.extend(
+                [
+                    nn.Linear(prev_size, layer_size),
+                    # nn.LayerNorm(layer_size),
+                    nn.ReLU(),
+                    nn.Dropout(self.dropout),
+                ]
+            )
             prev_size = layer_size
 
         # Final output layer
         output_layers.append(nn.Linear(prev_size, self.output_size))
 
         # Apply output activation
-        if self.output_activation == 'tanh':
+        if self.output_activation == "tanh":
             output_layers.append(nn.Tanh())
-        elif self.output_activation == 'sigmoid':
+        elif self.output_activation == "sigmoid":
             output_layers.append(nn.Sigmoid())
 
         self.output_net = nn.Sequential(*output_layers)
 
-        # Trajectory prediction head
-        self.trajectory_head = nn.Sequential(
-            nn.Linear(lstm_output_size, self.hidden_size),
-            nn.ReLU(),
-            nn.Dropout(self.dropout),
-            nn.Linear(self.hidden_size, self.output_size)
-        )
-
-        # Amplitude prediction head
-        self.amplitude_head = nn.Sequential(
-            nn.Linear(lstm_output_size, 64),
-            nn.ReLU(),
-            nn.Dropout(self.dropout),
-            nn.Linear(64, 1),
-            nn.ReLU()  # Amplitude is always positive
-        )
-
-    # def _initialize_weights(self):
-    #     """
-    #     Initialize model weights.
-    #     """
-    #     for name, param in self.named_parameters():
-    #         if 'weight' in name:
-    #             if 'lstm' in name:
-    #                 # LSTM weights
-    #                 nn.init.orthogonal_(param)
-    #             else:
-    #                 # Linear layer weights
-    #                 nn.init.xavier_uniform_(param)
-    #         elif 'bias' in name:
-    #             nn.init.constant_(param, 0)
-
-    def forward(
-        self,
-        batch: Dict[str, torch.Tensor]
-    ) -> Dict[str, torch.Tensor]:
+    def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """
         Forward pass of the LSTM predictor.
 
@@ -213,54 +169,138 @@ class LSTMPredictor(BaseVibrationModel):
         Returns:
             Dictionary containing model outputs
         """
-        features = batch['features']
-        targets = batch['targets']
+        features = batch["features"]
+        targets = batch["targets"]
         batch_size, seq_len, _ = features.shape
         batch_size, horizon_len, _ = targets.shape
 
         x = torch.cat([features, targets], dim=1)
 
-        # Embed parameters
-        # param_embedded = self.param_embedding(parameters)  # [batch_size, param_embedding_dim]
-
-        # Expand parameter embedding to match sequence length
-        # param_expanded = param_embedded.unsqueeze(1).expand(-1, seq_len, -1)  # [batch_size, seq_len, param_embedding_dim]
-
-        # Combine features with parameter embedding
-        # combined_input = torch.cat([features, param_expanded], dim=-1)  # [batch_size, seq_len, input_size + param_embedding_dim]
+        if self.training:  # Только во время обучения
+            std = torch.std(x, dim=1, keepdim=True)
+            # print(std.shape, x.shape)
+            noise = torch.randn_like(x) * self.teacher_forcing_noise_std * std
+            x = x + noise
 
         # Project to hidden size
         projected_input = self.input_projection(x)  # [batch_size, seq_len, hidden_size]
 
         # LSTM forward pass
-        lstm_output, (hidden, cell) = self.lstm(projected_input)  # [batch_size, seq_len, lstm_output_size]
-
-        # Apply attention
-        # output_input, attention_weights = self.attention(lstm_output)  # [batch_size, lstm_output_size]
-
-        # Combine with parameter embedding for output
-        # output_input = torch.cat([attended_output, param_embedded], dim=-1)
+        lstm_output, (hidden, cell) = self.lstm(
+            projected_input
+        )  # [batch_size, seq_len, lstm_output_size]
 
         # Generate outputs
-        trajectory_pred = self.output_net(lstm_output)  # [batch_size, seq_len, output_size]
-        # trajectory_pred = self.trajectory_head(output_input)  # [batch_size, output_size]
-        # amplitude_pred = self.amplitude_head(output_input)  # [batch_size, 1]
+        trajectory_pred = self.output_net(
+            lstm_output
+        )  # [batch_size, seq_len, output_size]
 
         return {
             # 'next_step': next_step,
-            'trajectory': trajectory_pred,
+            "trajectory": trajectory_pred,
             # 'amplitude': amplitude_pred,
             # 'attention_weights': attention_weights,
-            'hidden_state': hidden,
-            'cell_state': cell,
-            'lstm_output': lstm_output
+            "hidden_state": hidden,
+            "cell_state": cell,
+            "lstm_output": lstm_output,
+        }
+
+    # def forward_with_scheduled_sampling(
+    #     self, batch: Dict[str, torch.Tensor], teacher_forcing_ratio: float = 1.0
+    # ) -> Dict[str, torch.Tensor]:
+    #     """
+    #     Forward pass with scheduled sampling for training.
+
+    #     Args:
+    #         batch: Input batch containing features and targets
+    #         teacher_forcing_ratio: Probability of using ground truth (1.0 = always use ground truth)
+
+    #     Returns:
+    #         Dictionary containing model outputs
+    #     """
+    #     features = batch["features"]
+    #     targets = batch["targets"]
+    #     batch_size, seq_len, _ = features.shape
+    #     _, horizon_len, _ = targets.shape
+
+    #     projected_input = self.input_projection(features)
+    #     lstm_output, (hidden, cell) = self.lstm(projected_input)
+    #     output = self.output_net(lstm_output)
+
+    #     # Заранее генерим teacher forcing mask (1 = teacher, 0 = model)
+    #     teacher_mask = (torch.rand(batch_size, horizon_len, 1, device=features.device) < teacher_forcing_ratio).float()
+
+    #     preds = [output]
+    #     current_input = targets[:, 0:1, :]  # начнем с teacher
+
+    #     for t in range(horizon_len):
+    #         projected = self.input_projection(current_input)
+    #         lstm_out, (hidden, cell) = self.lstm(projected, (hidden, cell))
+    #         pred = self.output_net(lstm_out)
+    #         preds.append(pred)
+
+    #         if t + 1 < horizon_len:
+    #             # Смешиваем teacher и predicted значения
+    #             current_input = teacher_mask[:, t:t+1, :] * targets[:, t:t+1, :] + \
+    #                             (1 - teacher_mask[:, t:t+1, :]) * pred
+
+    #     trajectory_pred = torch.cat(preds, dim=1)
+
+
+    #     return {
+    #         "trajectory": trajectory_pred,
+    #         "hidden_state": hidden,
+    #         "cell_state": cell,
+    #         "teacher_forcing_ratio": teacher_forcing_ratio,
+    #     }
+
+    def forward_with_scheduled_sampling(
+        self, batch: Dict[str, torch.Tensor], teacher_forcing_ratio: float = 1.0
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Forward pass with scheduled sampling for training.
+
+        Args:
+            batch: Input batch containing features and targets
+            teacher_forcing_ratio: Probability of using ground truth (1.0 = always use ground truth)
+
+        Returns:
+            Dictionary containing model outputs
+        """
+        features = batch["features"]
+        targets = batch["targets"]
+        batch_size, seq_len, _ = features.shape
+        _, horizon_len, _ = targets.shape
+
+        projected_input = self.input_projection(features)
+        lstm_output, (hidden, cell) = self.lstm(projected_input)
+        output = self.output_net(lstm_output)
+
+        preds = [output]
+        current_input = targets[:, 0:1, :]  # начнем с teacher
+
+        for t in range(horizon_len):
+            projected = self.input_projection(current_input)
+            lstm_out, (hidden, cell) = self.lstm(projected, (hidden, cell))
+            pred = self.output_net(lstm_out)
+            preds.append(pred)
+
+            if t + 1 < horizon_len:
+                # Используем взвешенное среднее между target и prediction
+                current_input = teacher_forcing_ratio * targets[:, t:t+1, :] + (1 - teacher_forcing_ratio) * pred
+
+        trajectory_pred = torch.cat(preds, dim=1)
+
+
+        return {
+            "trajectory": trajectory_pred,
+            "hidden_state": hidden,
+            "cell_state": cell,
+            "teacher_forcing_ratio": teacher_forcing_ratio,
         }
 
     def predict_trajectory(
-        self,
-        features: torch.Tensor,
-        parameters: torch.Tensor,
-        horizon: int
+        self, features: torch.Tensor, parameters: torch.Tensor, horizon: int
     ) -> torch.Tensor:
         """
         Predict future trajectory using autoregressive generation.
@@ -286,17 +326,16 @@ class LSTMPredictor(BaseVibrationModel):
         for step in range(horizon):
             # Forward pass
             outputs = self.forward(current_input, parameters)
-            next_step = outputs['next_step']  # [batch_size, output_size]
+            next_step = outputs["next_step"]  # [batch_size, output_size]
 
             predictions.append(next_step.unsqueeze(1))  # [batch_size, 1, output_size]
 
             # Update input for next step (sliding window)
             if current_input.shape[1] > 1:
                 # Remove first timestep and append prediction
-                current_input = torch.cat([
-                    current_input[:, 1:, :],
-                    next_step.unsqueeze(1)
-                ], dim=1)
+                current_input = torch.cat(
+                    [current_input[:, 1:, :], next_step.unsqueeze(1)], dim=1
+                )
             else:
                 # Replace single timestep
                 current_input = next_step.unsqueeze(1)
@@ -311,7 +350,7 @@ class LSTMPredictor(BaseVibrationModel):
         features: torch.Tensor,
         parameters: torch.Tensor,
         horizon: int,
-        n_samples: int = 10
+        n_samples: int = 10,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Predict trajectory with uncertainty estimation using Monte Carlo dropout.
@@ -332,7 +371,9 @@ class LSTMPredictor(BaseVibrationModel):
             pred = self.predict_trajectory(features, parameters, horizon)
             predictions.append(pred)
 
-        predictions = torch.stack(predictions, dim=0)  # [n_samples, batch_size, horizon, output_size]
+        predictions = torch.stack(
+            predictions, dim=0
+        )  # [n_samples, batch_size, horizon, output_size]
 
         mean_pred = torch.mean(predictions, dim=0)
         std_pred = torch.std(predictions, dim=0)
@@ -342,21 +383,16 @@ class LSTMPredictor(BaseVibrationModel):
         return mean_pred, std_pred
 
     def get_attention_weights(
-        self,
-        features: torch.Tensor,
-        parameters: torch.Tensor
+        self, features: torch.Tensor, parameters: torch.Tensor
     ) -> torch.Tensor:
         """
         Get attention weights for interpretability.
         """
         outputs = self.forward(features, parameters)
-        return outputs['attention_weights']
+        return outputs["attention_weights"]
 
     def compute_feature_importance(
-        self,
-        features: torch.Tensor,
-        parameters: torch.Tensor,
-        method: str = 'gradient'
+        self, features: torch.Tensor, parameters: torch.Tensor, method: str = "gradient"
     ) -> torch.Tensor:
         """
         Compute feature importance using gradient-based methods.
@@ -364,13 +400,13 @@ class LSTMPredictor(BaseVibrationModel):
         features.requires_grad_(True)
 
         outputs = self.forward(features, parameters)
-        loss = outputs['amplitude'].sum()  # Use amplitude as target
+        loss = outputs["amplitude"].sum()  # Use amplitude as target
 
         loss.backward()
 
-        if method == 'gradient':
+        if method == "gradient":
             importance = torch.abs(features.grad).mean(dim=0)  # [seq_len, input_size]
-        elif method == 'integrated_gradient':
+        elif method == "integrated_gradient":
             # Simplified integrated gradients
             baseline = torch.zeros_like(features)
             importance = torch.abs(features.grad * (features - baseline)).mean(dim=0)
@@ -381,7 +417,7 @@ class LSTMPredictor(BaseVibrationModel):
 
 
 # Register the model
-ModelFactory.register_model('lstm', LSTMPredictor)
+ModelFactory.register_model("lstm", LSTMPredictor)
 
 
 class MultiScaleLSTM(BaseVibrationModel):
@@ -392,29 +428,29 @@ class MultiScaleLSTM(BaseVibrationModel):
     def __init__(self, config: Dict):
         super().__init__(config)
 
-        self.scales = config.get('scales', [1, 2, 4])  # Different temporal scales
+        self.scales = config.get("scales", [1, 2, 4])  # Different temporal scales
         self.base_config = config.copy()
 
         # Create LSTM for each scale
         self.scale_lstms = nn.ModuleList()
         for scale in self.scales:
             scale_config = self.base_config.copy()
-            scale_config['hidden_size'] = config.get('hidden_size', 128) // len(self.scales)
+            scale_config["hidden_size"] = config.get("hidden_size", 128) // len(
+                self.scales
+            )
             self.scale_lstms.append(LSTMPredictor(scale_config))
 
         # Fusion layer
-        total_hidden = config.get('hidden_size', 128)
+        total_hidden = config.get("hidden_size", 128)
         self.fusion = nn.Sequential(
             nn.Linear(total_hidden, total_hidden),
             nn.ReLU(),
-            nn.Dropout(config.get('dropout', 0.2)),
-            nn.Linear(total_hidden, config.get('output_size', 2))
+            nn.Dropout(config.get("dropout", 0.2)),
+            nn.Linear(total_hidden, config.get("output_size", 2)),
         )
 
     def forward(
-        self,
-        features: torch.Tensor,
-        parameters: torch.Tensor
+        self, features: torch.Tensor, parameters: torch.Tensor
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass with multi-scale processing.
@@ -430,24 +466,21 @@ class MultiScaleLSTM(BaseVibrationModel):
 
             # Process with scale-specific LSTM
             output = lstm(downsampled, parameters)
-            scale_outputs.append(output['lstm_output'][:, -1, :])  # Take last timestep
+            scale_outputs.append(output["lstm_output"][:, -1, :])  # Take last timestep
 
         # Fuse multi-scale features
         fused = torch.cat(scale_outputs, dim=-1)
         final_output = self.fusion(fused)
 
         return {
-            'next_step': final_output,
-            'trajectory': final_output,
-            'amplitude': torch.norm(final_output, dim=-1, keepdim=True),
-            'scale_outputs': scale_outputs
+            "next_step": final_output,
+            "trajectory": final_output,
+            "amplitude": torch.norm(final_output, dim=-1, keepdim=True),
+            "scale_outputs": scale_outputs,
         }
 
     def predict_trajectory(
-        self,
-        features: torch.Tensor,
-        parameters: torch.Tensor,
-        horizon: int
+        self, features: torch.Tensor, parameters: torch.Tensor, horizon: int
     ) -> torch.Tensor:
         """
         Multi-scale trajectory prediction.
@@ -457,4 +490,4 @@ class MultiScaleLSTM(BaseVibrationModel):
 
 
 # Register multi-scale model
-ModelFactory.register_model('multiscale_lstm', MultiScaleLSTM)
+ModelFactory.register_model("multiscale_lstm", MultiScaleLSTM)

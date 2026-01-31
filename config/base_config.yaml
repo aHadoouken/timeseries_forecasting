@@ -11,7 +11,6 @@ data:
   dataset_name: "mathieu_delayed_dataset.pkl"
 
 features:
-  use_features: ['basic']
   window_sizes: [10, 50, 100]  # for rolling statistics
 
 training:
@@ -22,6 +21,11 @@ training:
   gradient_clipping: 1.0
   optimizer: 'adam'
   scheduler: 'reduce_lr_on_plateau'
+  scheduled_sampling:
+    enabled: true  # Enable scheduled sampling during training
+    initial_ratio: 1.0  # Start with 100% teacher forcing
+    decay_rate: 0.98  # Decay rate per epoch (0.99 means 1% reduction per epoch)
+    min_ratio: 0.1  # Minimum teacher forcing ratio (never go below this)
 
 augmentation:
   noise_level: 0.01
@@ -33,17 +37,18 @@ model:
   num_layers: 2
   dropout: 0.2
   recurrent_dropout: 0.2
+  teacher_forcing_noise_std: 0.0
 
 loss:
   weights:
     trajectory: 1.0
-    amplitude: 2.0
-    stability: 0.5
-    physics: 0.1
+    physics: 0.5
 
 logging:
   log_interval: 10
   save_interval: 50
   plot_predictions: true
+  plot_realtime: true  # Enable real-time loss plotting during training
+  plot_update_interval: 1  # Update plot every N epochs (1 = every epoch)
 
 random_seed: 42

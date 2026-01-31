@@ -7,10 +7,11 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, FunctionTransformer
 from scipy import signal
 from typing import Dict, List, Tuple, Optional, Union
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class DataResampler:
             return t, x, x_dot
 
         original_rate = 1.0 / np.mean(np.diff(t))
+        # print("Original rate: {}".format(original_rate))
 
         if abs(original_rate - self.target_sampling_rate) < 1e-6:
             return t, x, x_dot
@@ -87,11 +89,11 @@ class VibrationDataset(Dataset):
         val_split: float = 0.15,
         test_split: float = 0.15,
         sampling_rate: Optional[float] = None,
-        features: List[str] = ['basic'],
-        normalization: str = 'z_score',
-        temporal_split: bool = False,
+        # features: List[str] = ['basic'],
+        normalization: str = None,
         exclude_params: Optional[List[Dict]] = None,
-        random_seed: int = 42
+        random_seed: int = 42,
+        max_samples_for_scaling=5000,
     ):
         """
         Initialize VibrationDataset.
@@ -116,19 +118,23 @@ class VibrationDataset(Dataset):
         self.prediction_horizon = prediction_horizon
         self.stride = stride
         self.split = split
-        self.features = features
         self.normalization = normalization
-        self.temporal_split = temporal_split
         self.random_seed = random_seed
+        self.max_samples_for_scaling = max_samples_for_scaling
+
+        # Start timing
+        start_time = time.time()
 
         # Set random seed
         np.random.seed(random_seed)
         torch.manual_seed(random_seed)
 
         # Load data
-        logger.info(f"Loading dataset from {data_path}")
+        print(f"Loading dataset from {data_path}")
+        load_start = time.time()
         with open(data_path, 'rb') as f:
             data = pickle.load(f)
+        print(f"Data loading took {time.time() - load_start:.2f} seconds")
 
         self.trajectories = data['trajectories']
         self.config = data.get('config', {})
@@ -137,9 +143,11 @@ class VibrationDataset(Dataset):
         self.resampler = DataResampler(target_sampling_rate=sampling_rate)
 
         # Split data
+        split_start = time.time()
         self.train_trajectories, self.val_trajectories, self.test_trajectories = self._split_data(
-            train_split, val_split, test_split, exclude_params
+            train_split, val_split, test_split
         )
+        print(f"Data splitting took {time.time() - split_start:.2f} seconds")
 
         # Get current split data
         if split == 'train':
@@ -150,20 +158,25 @@ class VibrationDataset(Dataset):
             self.current_trajectories = self.test_trajectories
 
         # Create sequences
+        seq_start = time.time()
         self.sequences = self._create_sequences()
+        print(f"Sequence creation took {time.time() - seq_start:.2f} seconds")
+        print(f"{len(self.sequences)} sequences created")
 
         # Initialize scalers
+        scaler_start = time.time()
         self.scalers = {}
         self._fit_scalers()
+        print(f"Scaler fitting took {time.time() - scaler_start:.2f} seconds")
 
-        logger.info(f"Dataset initialized: {len(self.sequences)} sequences for {split} split")
+        total_time = time.time() - start_time
+        print(f"Dataset initialized: {len(self.sequences)} sequences for {split} split in {total_time:.2f} seconds")
 
     def _split_data(
         self,
         train_split: float,
         val_split: float,
         test_split: float,
-        exclude_params: Optional[List[Dict]] = None
     ) -> Tuple[List, List, List]:
         """
         Split trajectories into train/val/test sets.
@@ -182,7 +195,7 @@ class VibrationDataset(Dataset):
             random_state=self.random_seed
         )
 
-        logger.info(f"Data split: {len(train_trajectories)} train, {len(val_trajectories)} val, {len(test_trajectories)} test")
+        print(f"Data split: {len(train_trajectories)} train, {len(val_trajectories)} val, {len(test_trajectories)} test")
         return train_trajectories, val_trajectories, test_trajectories
 
     def _create_sub_trajectory(self, traj: Dict, start_idx: int, end_idx: int) -> Dict:
@@ -249,29 +262,37 @@ class VibrationDataset(Dataset):
         if self.split != 'train':
             return
 
-        # Collect all training data
-        all_x = []
-        all_x_dot = []
-        all_params = []
+        # Time data collection
+        collect_start = time.time()
 
-        for seq in self.sequences:
-            all_x.extend(seq['input_x'])
-            all_x_dot.extend(seq['input_x_dot'])
-            all_params.append(list(seq['parameters'].values()))
+        # Vectorized data collection
+        sequences = np.random.choice(
+            self.sequences,
+            size=self.max_samples_for_scaling,
+            replace=False
+        )
 
-        all_x = np.array(all_x).reshape(-1, 1)
-        all_x_dot = np.array(all_x_dot).reshape(-1, 1)
-        all_params = np.array(all_params)
+        all_x = np.concatenate([seq['input_x'] for seq in sequences])
+        all_x_dot = np.concatenate([seq['input_x_dot'] for seq in sequences])
+        # Reshape for scalers
+        all_x = all_x.reshape(-1, 1)
+        all_x_dot = all_x_dot.reshape(-1, 1)
 
-        # Fit scalers
-        if self.normalization == 'z_score':
+        print(f"Vectorized data collection took {time.time() - collect_start:.2f} seconds")
+        print(f"Total points: {len(all_x)}")
+
+        # Time scaler fitting
+        fit_start = time.time()
+        if self.normalization is None:
+            self.scalers['x'] = FunctionTransformer(lambda x: x)
+            self.scalers['x_dot'] = FunctionTransformer(lambda x: x)
+        elif self.normalization == 'z_score':
             self.scalers['x'] = StandardScaler().fit(all_x)
             self.scalers['x_dot'] = StandardScaler().fit(all_x_dot)
-            self.scalers['params'] = StandardScaler().fit(all_params)
         else:
             self.scalers['x'] = MinMaxScaler((-1, 1)).fit(all_x)
             self.scalers['x_dot'] = MinMaxScaler((-1, 1)).fit(all_x_dot)
-            self.scalers['params'] = MinMaxScaler((-1, 1)).fit(all_params)
+        print(f"Scaler fitting took {time.time() - fit_start:.2f} seconds")
 
     def __len__(self) -> int:
         return len(self.sequences)
@@ -296,10 +317,7 @@ class VibrationDataset(Dataset):
             )
 
         # Stack features based on configuration
-        if 'basic' in self.features:
-            features = torch.stack([input_x, input_x_dot], dim=1)  # [seq_len, 2]
-        else:
-            features = torch.stack([input_x, input_x_dot], dim=1)
+        features = torch.stack([input_x, input_x_dot], dim=1)
 
         # Parameters
         params = torch.FloatTensor(list(seq['parameters'].values()))

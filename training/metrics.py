@@ -9,6 +9,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 from scipy.stats import pearsonr
 from scipy import signal
 import logging
+from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class VibrationMetrics:
         """
         Reset accumulated metrics.
         """
+        self.all_traj_metrics = defaultdict(list)
         self.predictions = []
         self.targets = []
         self.amplitudes_pred = []
@@ -65,78 +67,59 @@ class VibrationMetrics:
         if isinstance(targets, torch.Tensor):
             targets = targets.detach().cpu().numpy()
 
-        self.predictions.append(predictions)
-        self.targets.append(targets)
-
-        if amplitudes_pred is not None:
-            if isinstance(amplitudes_pred, torch.Tensor):
-                amplitudes_pred = amplitudes_pred.detach().cpu().numpy()
-            self.amplitudes_pred.append(amplitudes_pred)
-
-        if amplitudes_true is not None:
-            if isinstance(amplitudes_true, torch.Tensor):
-                amplitudes_true = amplitudes_true.detach().cpu().numpy()
-            self.amplitudes_true.append(amplitudes_true)
-
-        if parameters is not None:
-            if isinstance(parameters, torch.Tensor):
-                parameters = parameters.detach().cpu().numpy()
-            self.parameters.append(parameters)
-
-        if trajectory_ids is not None:
-            self.trajectory_ids.extend(trajectory_ids)
-
-    def compute_trajectory_metrics(self) -> Dict[str, float]:
-        """
-        Compute trajectory prediction metrics.
-        """
-        if not self.predictions:
-            return {}
-
-        # Concatenate all predictions and targets
-        all_predictions = np.concatenate(self.predictions, axis=0)
-        all_targets = np.concatenate(self.targets, axis=0)
-
         metrics = {}
 
         # Overall metrics
         metrics['rmse_overall'] = np.sqrt(mean_squared_error(
-            all_targets.reshape(-1),
-            all_predictions.reshape(-1)
+            targets.reshape(-1),
+            predictions.reshape(-1)
         ))
 
         metrics['mae_overall'] = mean_absolute_error(
-            all_targets.reshape(-1),
-            all_predictions.reshape(-1)
+            targets.reshape(-1),
+            predictions.reshape(-1)
         )
 
         metrics['r2_overall'] = r2_score(
-            all_targets.reshape(-1),
-            all_predictions.reshape(-1)
+            targets.reshape(-1),
+            predictions.reshape(-1)
         )
 
-        # Feature-wise metrics
-        n_features = all_predictions.shape[-1]
+        n_features = predictions.shape[-1]
         feature_names = ['position', 'velocity'] if n_features == 2 else [f'feature_{i}' for i in range(n_features)]
 
         for i, feature_name in enumerate(feature_names):
-            pred_feature = all_predictions[:, :, i].reshape(-1)
-            target_feature = all_targets[:, :, i].reshape(-1)
+            pred_feature = predictions[:, :, i].reshape(-1)
+            target_feature = targets[:, :, i].reshape(-1)
 
             metrics[f'rmse_{feature_name}'] = np.sqrt(mean_squared_error(target_feature, pred_feature))
             metrics[f'mae_{feature_name}'] = mean_absolute_error(target_feature, pred_feature)
             metrics[f'r2_{feature_name}'] = r2_score(target_feature, pred_feature)
 
-        # Horizon-wise metrics
-        seq_len = all_predictions.shape[1]
+        seq_len = predictions.shape[1]
         for horizon in self.prediction_horizons:
             if horizon <= seq_len:
-                pred_horizon = all_predictions[:, :horizon, :].reshape(-1)
-                target_horizon = all_targets[:, :horizon, :].reshape(-1)
+                pred_horizon = predictions[:, :horizon, :].reshape(-1)
+                target_horizon = targets[:, :horizon, :].reshape(-1)
 
                 metrics[f'rmse_horizon_{horizon}'] = np.sqrt(mean_squared_error(target_horizon, pred_horizon))
                 metrics[f'mae_horizon_{horizon}'] = mean_absolute_error(target_horizon, pred_horizon)
 
+        for metric_name, metric_value in metrics.items():
+            self.all_traj_metrics[metric_name].append(metric_value)
+
+
+    def compute_trajectory_metrics(self) -> Dict[str, float]:
+        """
+        Compute trajectory prediction metrics.
+        """
+        if not self.all_traj_metrics:
+            return {}
+
+        metrics = {}
+
+        for metric_name, metric_values in self.all_traj_metrics.items():
+            metrics[metric_name] = np.mean(metric_values)
         return metrics
 
     def compute_amplitude_metrics(self) -> Dict[str, float]:
@@ -323,21 +306,21 @@ class VibrationMetrics:
         traj_metrics = self.compute_trajectory_metrics()
         all_metrics.update(traj_metrics)
 
-        # Amplitude metrics
-        amp_metrics = self.compute_amplitude_metrics()
-        all_metrics.update(amp_metrics)
+        # # Amplitude metrics
+        # amp_metrics = self.compute_amplitude_metrics()
+        # all_metrics.update(amp_metrics)
 
-        # Frequency metrics
-        freq_metrics = self.compute_frequency_metrics()
-        all_metrics.update(freq_metrics)
+        # # Frequency metrics
+        # freq_metrics = self.compute_frequency_metrics()
+        # all_metrics.update(freq_metrics)
 
-        # Stability metrics
-        stability_metrics = self.compute_stability_metrics()
-        all_metrics.update(stability_metrics)
+        # # Stability metrics
+        # stability_metrics = self.compute_stability_metrics()
+        # all_metrics.update(stability_metrics)
 
-        # Parameter sensitivity
-        param_metrics = self.compute_parameter_sensitivity()
-        all_metrics.update(param_metrics)
+        # # Parameter sensitivity
+        # param_metrics = self.compute_parameter_sensitivity()
+        # all_metrics.update(param_metrics)
 
         return all_metrics
 

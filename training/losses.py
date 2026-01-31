@@ -185,39 +185,46 @@ class PhysicsLoss(nn.Module):
 
         # Extract position and velocity
         x = predictions[:, :, 0]  # [batch_size, seq_len]
-        x_dot = predictions[:, :, 1]  # [batch_size, seq_len]
+        x_dot = predictions[:, 1:-1, 1]  # [batch_size, seq_len]
 
-        # Compute numerical derivatives
-        x_dot_numerical = torch.zeros_like(x_dot)
-        x_dot_numerical[:, 1:] = (x[:, 1:] - x[:, :-1]) / dt
-        x_dot_numerical[:, 0] = x_dot_numerical[:, 1]  # Forward fill
+        # # Compute numerical derivatives
+        # x_dot_numerical = torch.zeros_like(x_dot)
+        # x_dot_numerical[:, 1:] = (x[:, 1:] - x[:, :-1]) / dt
+        # x_dot_numerical[:, 0] = x_dot_numerical[:, 1]  # Forward fill
+
+        # Central difference calculation (fixed indexing)
+        x_dot_numerical = (x[:, 2:] - x[:, :-2]) / (2 * dt)
 
         # Consistency loss: predicted velocity should match numerical derivative
         velocity_consistency = F.mse_loss(x_dot, x_dot_numerical)
 
-        # Energy conservation (approximate)
-        if parameters.shape[1] >= 3:  # Assuming k, d, e are first 3 parameters
-            k = parameters[:, 0].unsqueeze(1)  # Damping
-            d = parameters[:, 1].unsqueeze(1)  # Stiffness
-
-            # Kinetic energy
-            kinetic_energy = 0.5 * x_dot ** 2
-
-            # Potential energy (harmonic oscillator approximation)
-            potential_energy = 0.5 * d * x ** 2
-
-            # Total energy
-            total_energy = kinetic_energy + potential_energy
-
-            # Energy should be relatively conserved (penalize large changes)
-            energy_changes = torch.abs(total_energy[:, 1:] - total_energy[:, :-1])
-            energy_conservation = torch.mean(energy_changes)
-        else:
-            energy_conservation = torch.tensor(0.0, device=predictions.device)
-
-        physics_loss = (velocity_consistency + energy_conservation) * self.physics_weight
+        physics_loss = velocity_consistency
 
         return physics_loss
+
+        # Energy conservation (approximate)
+        # if parameters.shape[1] >= 3:  # Assuming k, d, e are first 3 parameters
+        #     k = parameters[:, 0].unsqueeze(1)  # Damping
+        #     d = parameters[:, 1].unsqueeze(1)  # Stiffness
+
+        #     # Kinetic energy
+        #     kinetic_energy = 0.5 * x_dot ** 2
+
+        #     # Potential energy (harmonic oscillator approximation)
+        #     potential_energy = 0.5 * d * x ** 2
+
+        #     # Total energy
+        #     total_energy = kinetic_energy + potential_energy
+
+        #     # Energy should be relatively conserved (penalize large changes)
+        #     energy_changes = torch.abs(total_energy[:, 1:] - total_energy[:, :-1])
+        #     energy_conservation = torch.mean(energy_changes)
+        # else:
+        #     energy_conservation = torch.tensor(0.0, device=predictions.device)
+
+        # physics_loss = (velocity_consistency + energy_conservation) * self.physics_weight
+
+        # return physics_loss
 
 
 class CombinedLoss(nn.Module):
@@ -246,7 +253,7 @@ class CombinedLoss(nn.Module):
 
     def forward(
         self,
-        outputs: Dict[str, torch.Tensor],
+        predictions: Dict[str, torch.Tensor],
         targets: Dict[str, torch.Tensor],
         parameters: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
@@ -262,47 +269,40 @@ class CombinedLoss(nn.Module):
             Total loss and individual loss components
         """
         losses = {}
-        total_loss = torch.tensor(0.0, device=next(iter(outputs.values())).device)
+        total_loss = torch.tensor(0.0, device=predictions.device)
 
         # Trajectory loss
         if 'trajectory' in self.weights and self.weights['trajectory'] > 0:
-            if 'trajectory' in outputs and 'targets' in targets:
-                traj_loss = self.trajectory_loss(outputs['trajectory'], targets['targets'])
-                losses['trajectory'] = traj_loss
-                total_loss += self.weights['trajectory'] * traj_loss
-
-        # Next step prediction loss
-        if 'next_step' in outputs and 'targets' in targets:
-            next_step_target = targets['targets'][:, 0, :]  # First timestep of target
-            next_step_loss = self.trajectory_loss(outputs['next_step'], next_step_target)
-            losses['next_step'] = next_step_loss
-            total_loss += self.weights.get('trajectory', 1.0) * next_step_loss
-
-        # Amplitude loss
-        if 'amplitude' in self.weights and self.weights['amplitude'] > 0:
-            if 'amplitude' in outputs and 'max_amplitude' in targets:
-                amp_loss = self.amplitude_loss(
-                    outputs['amplitude'],
-                    targets['max_amplitude'],
-                    outputs.get('trajectory'),
-                    targets.get('targets')
-                )
-                losses['amplitude'] = amp_loss
-                total_loss += self.weights['amplitude'] * amp_loss
-
-        # Stability loss
-        if 'stability' in self.weights and self.weights['stability'] > 0:
-            if 'trajectory' in outputs:
-                stab_loss = self.stability_loss(outputs['trajectory'])
-                losses['stability'] = stab_loss
-                total_loss += self.weights['stability'] * stab_loss
+            traj_loss = self.trajectory_loss(predictions, targets)
+            losses['trajectory'] = self.weights['trajectory'] * traj_loss
+            total_loss += self.weights['trajectory'] * traj_loss
 
         # Physics loss
         if 'physics' in self.weights and self.weights['physics'] > 0:
-            if 'trajectory' in outputs and parameters is not None:
-                phys_loss = self.physics_loss(outputs['trajectory'], parameters)
-                losses['physics'] = phys_loss
-                total_loss += self.weights['physics'] * phys_loss
+            phys_loss = self.physics_loss(predictions, targets, parameters["dt"])
+            losses['physics'] = self.weights['physics'] * phys_loss
+            total_loss += self.weights['physics'] * phys_loss
+
+        # Amplitude loss
+        # if 'amplitude' in self.weights and self.weights['amplitude'] > 0:
+        #     if 'amplitude' in outputs and 'max_amplitude' in targets:
+        #         amp_loss = self.amplitude_loss(
+        #             outputs['amplitude'],
+        #             targets['max_amplitude'],
+        #             outputs.get('trajectory'),
+        #             targets.get('targets')
+        #         )
+        #         losses['amplitude'] = amp_loss
+        #         total_loss += self.weights['amplitude'] * amp_loss
+
+        # Stability loss
+        # if 'stability' in self.weights and self.weights['stability'] > 0:
+        #     if 'trajectory' in outputs:
+        #         stab_loss = self.stability_loss(outputs['trajectory'])
+        #         losses['stability'] = stab_loss
+        #         total_loss += self.weights['stability'] * stab_loss
+
+
 
         return total_loss, losses
 
