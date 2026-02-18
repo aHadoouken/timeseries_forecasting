@@ -73,50 +73,62 @@ class AmplitudeLoss(nn.Module):
     Loss for amplitude prediction with emphasis on growth detection.
     """
 
-    def __init__(self, growth_penalty: float = 2.0):
+    def __init__(self):
         super().__init__()
-        self.growth_penalty = growth_penalty
+        # self.growth_penalty = growth_penalty
 
     def forward(
         self,
-        pred_amplitude: torch.Tensor,
-        target_amplitude: torch.Tensor,
-        pred_trajectory: Optional[torch.Tensor] = None,
-        target_trajectory: Optional[torch.Tensor] = None
+        predictions: torch.Tensor,
+        targets: torch.Tensor,
+        mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """
-        Compute amplitude loss with growth penalty.
+        std_pred = torch.std(predictions, dim=1)
+        std_target = torch.std(targets, dim=1)
 
-        Args:
-            pred_amplitude: Predicted max amplitude [batch_size, 1]
-            target_amplitude: Target max amplitude [batch_size, 1]
-            pred_trajectory: Predicted trajectory (optional)
-            target_trajectory: Target trajectory (optional)
+        # Штрафуем разницу в энергиях
+        return torch.mean((std_pred - std_target) ** 2)
 
-        Returns:
-            Loss value
-        """
-        # Basic amplitude MSE
-        amplitude_loss = F.mse_loss(pred_amplitude, target_amplitude)
+    # def forward(
+    #     self,
+    #     pred_amplitude: torch.Tensor,
+    #     target_amplitude: torch.Tensor,
+    #     pred_trajectory: Optional[torch.Tensor] = None,
+    #     target_trajectory: Optional[torch.Tensor] = None
+    # ) -> torch.Tensor:
+    #     """
+    #     Compute amplitude loss with growth penalty.
 
-        # Penalty for underestimating amplitude growth
-        underestimation_mask = pred_amplitude < target_amplitude
-        underestimation_penalty = F.mse_loss(
-            pred_amplitude[underestimation_mask],
-            target_amplitude[underestimation_mask]
-        ) * self.growth_penalty if underestimation_mask.any() else 0
+    #     Args:
+    #         pred_amplitude: Predicted max amplitude [batch_size, 1]
+    #         target_amplitude: Target max amplitude [batch_size, 1]
+    #         pred_trajectory: Predicted trajectory (optional)
+    #         target_trajectory: Target trajectory (optional)
 
-        total_loss = amplitude_loss + underestimation_penalty
+    #     Returns:
+    #         Loss value
+    #     """
+    #     # Basic amplitude MSE
+    #     amplitude_loss = F.mse_loss(pred_amplitude, target_amplitude)
 
-        # If trajectories are provided, compute trajectory-based amplitude
-        if pred_trajectory is not None and target_trajectory is not None:
-            pred_traj_amplitude = torch.max(torch.abs(pred_trajectory), dim=1)[0].max(dim=1)[0]
-            target_traj_amplitude = torch.max(torch.abs(target_trajectory), dim=1)[0].max(dim=1)[0]
+    #     # Penalty for underestimating amplitude growth
+    #     underestimation_mask = pred_amplitude < target_amplitude
+    #     underestimation_penalty = F.mse_loss(
+    #         pred_amplitude[underestimation_mask],
+    #         target_amplitude[underestimation_mask]
+    #     ) * self.growth_penalty if underestimation_mask.any() else 0
 
-            traj_amplitude_loss = F.mse_loss(pred_traj_amplitude, target_traj_amplitude)
-            total_loss += traj_amplitude_loss
+    #     total_loss = amplitude_loss + underestimation_penalty
 
-        return total_loss
+    #     # If trajectories are provided, compute trajectory-based amplitude
+    #     if pred_trajectory is not None and target_trajectory is not None:
+    #         pred_traj_amplitude = torch.max(torch.abs(pred_trajectory), dim=1)[0].max(dim=1)[0]
+    #         target_traj_amplitude = torch.max(torch.abs(target_trajectory), dim=1)[0].max(dim=1)[0]
+
+    #         traj_amplitude_loss = F.mse_loss(pred_traj_amplitude, target_traj_amplitude)
+    #         total_loss += traj_amplitude_loss
+
+    #     return total_loss
 
 
 class StabilityLoss(nn.Module):
@@ -245,7 +257,7 @@ class CombinedLoss(nn.Module):
 
         # Initialize loss components
         self.trajectory_loss = TrajectoryLoss(loss_type='mse')
-        self.amplitude_loss = AmplitudeLoss(growth_penalty=2.0)
+        self.amplitude_loss = AmplitudeLoss()
         self.stability_loss = StabilityLoss()
         self.physics_loss = PhysicsLoss()
 
@@ -276,6 +288,11 @@ class CombinedLoss(nn.Module):
             traj_loss = self.trajectory_loss(predictions, targets)
             losses['trajectory'] = self.weights['trajectory'] * traj_loss
             total_loss += self.weights['trajectory'] * traj_loss
+
+        if 'amplitude' in self.weights and self.weights['amplitude'] > 0:
+            traj_loss = self.amplitude_loss(predictions, targets)
+            losses['amplitude'] = self.weights['amplitude'] * traj_loss
+            total_loss += self.weights['amplitude'] * traj_loss
 
         # Physics loss
         if 'physics' in self.weights and self.weights['physics'] > 0:

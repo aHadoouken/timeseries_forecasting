@@ -16,7 +16,7 @@ from typing import Dict, Optional
 project_root = Path(__file__).parent
 sys.path.append(str(project_root))
 
-from data.dataset import create_dataloaders
+from data.dataset import VibrationDataset, create_dataloaders
 from models.base_model import ModelFactory
 from training.trainer import Trainer
 from utils.visualization import VibrationVisualizer
@@ -118,7 +118,7 @@ def train_model(config: Dict, output_dir: str = "outputs") -> Dict:
     # Create data loaders
     logger.info("Creating data loaders...")
 
-    # Prepare dataset configuration
+    # Prepare dataset configuration and create single dataset
     dataset_config = {
         'data_path': os.path.join(config['data']['dataset_path'], config['data']['dataset_name']),
         'window_size': config['data']['window_size'],
@@ -131,9 +131,9 @@ def train_model(config: Dict, output_dir: str = "outputs") -> Dict:
         'features': config['features']['use_features'],
         'random_seed': config.get('random_seed', 42)
     }
-
+    dataset = VibrationDataset(split='train', **dataset_config)
     train_loader, val_loader, test_loader = create_dataloaders(
-        dataset_config,
+        dataset,
         batch_size=config['training']['batch_size'],
         num_workers=4
     )
@@ -208,9 +208,9 @@ def evaluate_model(model_path: str, config: Dict, output_dir: str = "evaluation"
         'features': config['features']['use_features'],
         'random_seed': config.get('random_seed', 42)
     }
-
+    dataset = VibrationDataset(split='train', **dataset_config)
     _, _, test_loader = create_dataloaders(
-        dataset_config,
+        dataset,
         batch_size=config['training']['batch_size'],
         num_workers=4
     )

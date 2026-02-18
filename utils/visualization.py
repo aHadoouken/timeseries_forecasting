@@ -896,3 +896,208 @@ def create_training_dashboard(
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
 
     return fig
+
+class VibrationVisualizer2:
+    """
+    Comprehensive visualization tools for vibration data and predictions.
+    """
+
+    def __init__(self, figsize: Tuple[int, int] = (1200, 800), dpi: int = 150):
+        """
+        Initialize visualizer.
+
+        Args:
+            figsize: Default figure size (width, height in pixels for plotly)
+            dpi: Figure DPI (kept for compatibility, not used in plotly)
+        """
+        self.figsize = figsize
+        self.dpi = dpi
+
+    def plot_trajectory_comparison(
+        self,
+        input_data: np.ndarray,
+        target_data: np.ndarray,
+        predicted_data: np.ndarray,
+        time_input: Optional[np.ndarray] = None,
+        time_target: Optional[np.ndarray] = None,
+        feature_names: List[str] = ['Position', 'Velocity'],
+        title: str = "Trajectory Comparison",
+        save_path: Optional[str] = None,
+        show_plot: bool = True
+    ):
+        """
+        Plot comparison between input, target, and predicted trajectories.
+
+        Args:
+            input_data: Input sequence [seq_len, n_features]
+            target_data: Target sequence [pred_len, n_features]
+            predicted_data: Predicted sequence [pred_len, n_features]
+            time_input: Time array for input
+            time_target: Time array for target/prediction
+            feature_names: Names of features
+            title: Plot title
+            save_path: Path to save figure (as HTML)
+            show_plot: Whether to display the plot
+        """
+        n_features = input_data.shape[1]
+
+        # Create subplots
+        fig = make_subplots(
+            rows=n_features,
+            cols=1,
+            subplot_titles=feature_names,
+            vertical_spacing=0.1,
+            shared_xaxes=True
+        )
+
+        # Create time arrays if not provided
+        if time_input is None:
+            time_input = np.arange(len(input_data))
+        if time_target is None:
+            time_target = np.arange(len(input_data), len(input_data) + len(target_data))
+
+        # Colors for consistent styling
+        colors = {
+            'input': 'blue',
+            'target': 'green',
+            'prediction': 'red'
+        }
+
+        for i in range(n_features):
+            row = i + 1
+
+            # Plot input
+            fig.add_trace(
+                go.Scatter(
+                    x=time_input,
+                    y=input_data[:, i],
+                    mode='lines',
+                    name='Input',
+                    line=dict(color=colors['input'], width=2),
+                    legendgroup=f'group{i}',
+                    showlegend=(i == 0),  # Show legend only for first subplot
+                    hovertemplate='Time: %{x:.2f}<br>Value: %{y:.4f}<extra></extra>'
+                ),
+                row=row, col=1
+            )
+
+            # Plot target
+            fig.add_trace(
+                go.Scatter(
+                    x=time_target,
+                    y=target_data[:, i],
+                    mode='lines',
+                    name='Target',
+                    line=dict(color=colors['target'], width=2),
+                    legendgroup=f'group{i}',
+                    showlegend=(i == 0),
+                    hovertemplate='Time: %{x:.2f}<br>Value: %{y:.4f}<extra></extra>'
+                ),
+                row=row, col=1
+            )
+
+            # Plot prediction
+            fig.add_trace(
+                go.Scatter(
+                    x=time_target,
+                    y=predicted_data[:, i],
+                    mode='lines',
+                    name='Prediction',
+                    line=dict(color=colors['prediction'], width=2, dash='dash'),
+                    legendgroup=f'group{i}',
+                    showlegend=(i == 0),
+                    hovertemplate='Time: %{x:.2f}<br>Value: %{y:.4f}<extra></extra>'
+                ),
+                row=row, col=1
+            )
+
+            # Add vertical line at prediction start
+            fig.add_vline(
+                x=time_input[-1],
+                line_width=1,
+                line_dash="dot",
+                line_color="gray",
+                opacity=0.7,
+                row=row, col=1
+            )
+
+            # Add shaded region for prediction area
+            fig.add_vrect(
+                x0=time_target[0],
+                x1=time_target[-1],
+                fillcolor="red",
+                opacity=0.05,
+                layer="below",
+                line_width=0,
+                row=row, col=1
+            )
+
+            # Calculate and display error metrics
+            # mse = np.mean((predicted_data[:, i] - target_data[:, i])**2)
+            # mae = np.mean(np.abs(predicted_data[:, i] - target_data[:, i]))
+
+            # Add error annotation
+            # fig.add_annotation(
+            #     text=f"MSE: {mse:.4e}<br>MAE: {mae:.4e}",
+            #     xref=f"x{row if row > 1 else ''}",
+            #     yref=f"y{row if row > 1 else ''}",
+            #     x=time_target[-1],
+            #     y=max(np.max(target_data[:, i]), np.max(predicted_data[:, i])),
+            #     showarrow=False,
+            #     bgcolor="rgba(255, 255, 255, 0.8)",
+            #     bordercolor="gray",
+            #     borderwidth=1,
+            #     font=dict(size=10)
+            # )
+
+            # Update y-axis label
+            fig.update_yaxes(title_text=feature_names[i], row=row, col=1)
+
+        # Update x-axis label (only for bottom subplot)
+        fig.update_xaxes(title_text="Time", row=n_features, col=1)
+
+        # Update layout
+        fig.update_layout(
+            title={
+                'text': title,
+                'x': 0.5,
+                'xanchor': 'center',
+                'font': {'size': 16, 'color': 'black'}
+            },
+            height=self.figsize[1],
+            width=self.figsize[0],
+            hovermode='x unified',
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            ),
+            template='plotly_white'
+        )
+
+        # Add range slider for better navigation
+        fig.update_xaxes(
+            rangeslider=dict(visible=True, thickness=0.05),
+            row=n_features, col=1
+        )
+
+        # Save if path provided
+        if save_path:
+            # Save as HTML for full interactivity
+            fig.write_html(save_path)
+            # Optionally also save as static image (requires kaleido)
+            try:
+                import kaleido
+                static_path = save_path.replace('.html', '.png')
+                fig.write_image(static_path, width=self.figsize[0], height=self.figsize[1])
+            except ImportError:
+                pass
+
+        # Show plot
+        if show_plot:
+            fig.show()
+
+        return fig

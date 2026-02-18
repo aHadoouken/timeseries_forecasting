@@ -50,6 +50,8 @@ class Trainer:
         config: Dict,
         const_parameters: Dict,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        checkpoint_folder: Optional[str] = None,
+        checkpoint_interval: Optional[int] = None,
     ):
         """
         Initialize trainer.
@@ -151,6 +153,13 @@ class Trainer:
         # Create output directory
         self.output_dir = config.get("output_dir", "outputs")
         os.makedirs(self.output_dir, exist_ok=True)
+
+        # Checkpoint saving during training
+        self.checkpoint_folder = checkpoint_folder
+        self.checkpoint_interval = checkpoint_interval
+        self.global_step = 0
+        if self.checkpoint_folder is not None:
+            os.makedirs(self.checkpoint_folder, exist_ok=True)
 
         logger.info(f"Trainer initialized on device: {device}")
         logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -501,8 +510,8 @@ class Trainer:
                 k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                 for k, v in batch.items()
             }
-            features = batch["features"]
-            targets = batch["targets"]
+            features = batch["features_norm"]
+            targets = batch["targets_norm"]
             batch_size, seq_len, _ = features.shape
             batch_size, horizon_len, _ = targets.shape
 
@@ -527,7 +536,7 @@ class Trainer:
                 outputs = self.model(batch)
             predictions = outputs["trajectory"][:, seq_len - 1 : -1, :]
 
-            targets = batch["targets"]
+            targets = batch["targets_norm"]
 
             # Compute loss
             loss, losses = self.criterion(
@@ -547,6 +556,15 @@ class Trainer:
 
             # Optimizer step
             self.optimizer.step()
+
+            # Save step checkpoint
+            self.global_step += 1
+            if (
+                self.checkpoint_folder is not None
+                and self.checkpoint_interval is not None
+                and self.global_step % self.checkpoint_interval == 0
+            ):
+                self._save_step_checkpoint(loss.item())
 
             # Update metrics
             total_loss += loss.item()
@@ -581,7 +599,7 @@ class Trainer:
 
         # Compute epoch metrics
         avg_loss = total_loss / total_batches
-        avg_loss_components = {k: v / total_samples for k, v in total_loss_components.items()}
+        avg_loss_components = {k: v / total_batches for k, v in total_loss_components.items()}
 
         # Compute detailed metrics
         detailed_metrics = self.train_metrics.compute_all_metrics()
@@ -618,8 +636,8 @@ class Trainer:
                     k: v.to(self.device) if isinstance(v, torch.Tensor) else v
                     for k, v in batch.items()
                 }
-                features = batch["features"]
-                targets = batch["targets"]
+                features = batch["features_norm"]
+                targets = batch["targets_norm"]
                 batch_size, seq_len, _ = features.shape
                 batch_size, horizon_len, _ = targets.shape
 
@@ -627,7 +645,7 @@ class Trainer:
                 outputs = self.model(batch)
 
                 predictions = outputs["trajectory"][:, seq_len - 1 : -1, :]
-                targets = batch["targets"]
+                targets = batch["targets_norm"]
 
                 # Compute loss
                 loss, losses = self.criterion(
@@ -653,7 +671,7 @@ class Trainer:
 
         # Compute epoch metrics
         avg_loss = total_loss / total_batches
-        avg_loss_components = {k: v / total_samples for k, v in total_loss_components.items()}
+        avg_loss_components = {k: v / total_batches for k, v in total_loss_components.items()}
         # avg_loss_components = {k: v / total_samples for k, v in loss_components.items()}
 
         # Compute detailed metrics
@@ -827,6 +845,28 @@ class Trainer:
         else:
             logger.debug(f"Checkpoint saved to {filepath}")
 
+    def _save_step_checkpoint(self, last_loss: float):
+        """
+        Save a training checkpoint to checkpoint_folder at a given global step.
+        Filename includes global_step so successive train() calls never overwrite previous checkpoints.
+        """
+        filename = f"step_{self.global_step}.pth"
+        filepath = os.path.join(self.checkpoint_folder, filename)
+
+        checkpoint = {
+            "global_step": self.global_step,
+            "epoch": self.current_epoch,
+            "last_loss": last_loss,
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict() if self.scheduler else None,
+            "best_val_loss": self.best_val_loss,
+            "config": self.config,
+        }
+
+        torch.save(checkpoint, filepath)
+        logger.info(f"Step checkpoint saved to {filepath} (global_step={self.global_step})")
+
     def load_checkpoint(self, filepath: str) -> int:
         """
         Load model checkpoint.
@@ -843,9 +883,11 @@ class Trainer:
         self.training_history = checkpoint.get(
             "training_history", self.training_history
         )
+        self.global_step = checkpoint.get("global_step", self.global_step)
+        self.current_epoch = checkpoint.get("epoch", self.current_epoch)
 
         epoch = checkpoint["epoch"]
-        logger.info(f"Checkpoint loaded from {filepath}, epoch {epoch}")
+        logger.info(f"Checkpoint loaded from {filepath}, epoch {epoch}, global_step {self.global_step}")
 
         return epoch
 
@@ -863,11 +905,11 @@ class Trainer:
         }
 
         with torch.no_grad():
-            outputs = self.model(batch["features"], batch["parameters"])
+            outputs = self.model(batch["features_norm"], batch["parameters"])
 
         # Convert to numpy
-        features = batch["features"][:n_samples].cpu().numpy()
-        targets = batch["targets"][:n_samples].cpu().numpy()
+        features = batch["features_norm"][:n_samples].cpu().numpy()
+        targets = batch["targets_norm"][:n_samples].cpu().numpy()
         predictions = outputs["trajectory"][:n_samples].cpu().numpy()
 
         # Create plots
